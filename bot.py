@@ -1,277 +1,657 @@
 """
-BOT DE MEDICINAS CUBA - VERSIÓN INICIAL
-Fase 1: Búsqueda básica por provincia
+BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL
+100% por botones | Proveedores | Catálogos | Links personalizados
 Compatible con Python 3.14 y python-telegram-bot v21+
 """
 
 import logging
 import json
 import os
+import re
 import asyncio
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, 
+    MessageHandler, filters, ContextTypes, ConversationHandler
+)
 
-# Configuración
+# ===== CONFIGURACIÓN =====
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Estados para la conversación
-PROVINCIA, BUSQUEDA = range(2)
+TOKEN = "8685939368:AAESfgUVeQG0qA8521Qx5LO_7Qm3LY27Qq0"
+ADMIN_ID = 814338625  # Tu Telegram ID
 
-# Lock para proteger acceso concurrente a los datos
+# Estados para conversaciones
+PROVINCIA, ESPERANDO_MEDICINA, ESPERANDO_LISTADO, ESPERANDO_CONTACTO, ESPERANDO_TELEFONO, ESPERANDO_TELEGRAM = range(6)
+
+# Lock para proteger datos
 datos_lock = asyncio.Lock()
 
-# ===== BASE DE DATOS SIMPLE (archivo JSON) =====
-
+# ===== BASE DE DATOS =====
 ARCHIVO_DATOS = "medicinas_cuba.json"
 
 DATOS_POR_DEFECTO = {
-    "usuarios": {},
-    "medicamentos": {
-        "paracetamol": {
-            "contactos": [
-                {"telefono": "+53 5 1234567", "provincia": "Santiago de Cuba", "zona": "Centro", "fecha": "2024-01-15"},
-                {"telefono": "+53 5 7654321", "provincia": "Santiago de Cuba", "zona": "Reparto", "fecha": "2024-01-14"}
-            ]
-        },
-        "ibuprofeno": {
-            "contactos": [
-                {"telefono": "+53 5 9876543", "provincia": "Santiago de Cuba", "zona": "Alto", "fecha": "2024-01-15"}
-            ]
-        },
-        "amoxicilina": {
-            "contactos": [
-                {"telefono": "+53 5 4567890", "provincia": "Santiago de Cuba", "zona": "Centro", "fecha": "2024-01-13"}
-            ]
-        }
-    },
-    "reportes": [],
-    "provincias": [
-        "Pinar del Río", "Artemisa", "La Habana", "Mayabeque", "Matanzas",
-        "Cienfuegos", "Villa Clara", "Sancti Spíritus", "Ciego de Ávila",
-        "Camagüey", "Las Tunas", "Granma", "Holguín", "Santiago de Cuba",
-        "Guantánamo", "Isla de la Juventud"
-    ]
+    "proveedores": {},  # telegram_id: {nombre, contacto, catalogo, destacado_hasta, link_token}
+    "clientes": {},     # telegram_id: {provincia, ultima_busqueda}
+    "administradores": [ADMIN_ID],
+    "medicinas": [],    # {nombre, mg, precio, proveedor_id, provincia, zona, fecha}
+    "provincias": ["Pinar del Río", "Artemisa", "La Habana", "Mayabeque", "Matanzas", "Cienfuegos", "Villa Clara", "Sancti Spíritus", "Ciego de Ávila", "Camagüey", "Las Tunas", "Granma", "Holguín", "Santiago de Cuba", "Guantánamo", "Isla de la Juventud"],
+    "proveedores_destacados": []
 }
 
 def cargar_datos():
-    """Carga los datos desde el archivo JSON o crea datos por defecto"""
     if os.path.exists(ARCHIVO_DATOS):
         try:
             with open(ARCHIVO_DATOS, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Error cargando datos: {e}. Usando datos por defecto.")
+        except:
+            return DATOS_POR_DEFECTO
     return DATOS_POR_DEFECTO
 
-def guardar_datos(datos_a_guardar):
-    """Guarda los datos en el archivo JSON"""
+def guardar_datos(datos):
     with open(ARCHIVO_DATOS, 'w', encoding='utf-8') as f:
-        json.dump(datos_a_guardar, f, ensure_ascii=False, indent=2)
+        json.dump(datos, f, ensure_ascii=False, indent=2)
 
-# Cargar datos al iniciar
 datos = cargar_datos()
 
-# ===== FUNCIONES DEL BOT =====
+# ===== FUNCIONES AUXILIARES =====
+
+def normalizar_texto(texto):
+    """Elimina acentos y convierte a minúsculas"""
+    texto = texto.lower()
+    acentos = {'á':'a','é':'e','í':'i','ó':'o','ú':'u','ü':'u'}
+    for a, b in acentos.items():
+        texto = texto.replace(a, b)
+    return texto
+
+def extraer_medicinas_desde_texto(texto):
+    """Extrae medicinas, mg y precios de un texto pegado"""
+    lineas = texto.split('\n')
+    medicinas = []
+    
+    for linea in lineas:
+        linea = linea.strip()
+        if not linea or len(linea) < 2:
+            continue
+        
+        # Detectar patrones
+        nombre = None
+        mg = None
+        precio = None
+        
+        # Patrón: "Medicina(mg)-precio" o "Medicina(mg) - precio"
+        match = re.search(r'([A-Za-záéíóúüñ]+[A-Za-záéíóúüñ\s\(\)\-]+?)(?:\((\d+\s?mg)\))?\s*[-:]\s*(\d+)', linea, re.IGNORECASE)
+        if match:
+            nombre = match.group(1).strip()
+            mg = match.group(2) if match.group(2) else None
+            precio = match.group(3)
+        else:
+            # Patrón: "📌 Medicina: precio"
+            match = re.search(r'📌\s*([A-Za-záéíóúüñ\s]+)[:：]\s*(\d+)', linea)
+            if match:
+                nombre = match.group(1).strip()
+                precio = match.group(2)
+            else:
+                # Patrón: "*Medicina*💊" o "Medicina💊"
+                match = re.search(r'\*?([A-Za-záéíóúüñ\s]+?)\*?[💊]', linea)
+                if match:
+                    nombre = match.group(1).strip()
+        
+        if nombre and len(nombre) > 1:
+            medicinas.append({
+                "nombre": normalizar_texto(nombre),
+                "nombre_original": nombre,
+                "mg": mg,
+                "precio": precio
+            })
+    
+    return medicinas
+
+async def menu_principal(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id=None):
+    """Muestra el menú principal con botones"""
+    if user_id is None:
+        user_id = str(update.effective_user.id)
+    
+    # Obtener provincia del cliente
+    provincia = datos["clientes"].get(user_id, {}).get("provincia", "No seleccionada")
+    es_admin = int(user_id) in datos["administradores"]
+    
+    teclado = [
+        [InlineKeyboardButton("🔍 Buscar Medicina", callback_data="buscar")],
+        [InlineKeyboardButton("📝 Publicar Catálogo", callback_data="publicar")],
+        [InlineKeyboardButton("📍 Cambiar Provincia", callback_data="cambiar_provincia")],
+        [InlineKeyboardButton("👤 Mi Perfil", callback_data="mi_perfil")],
+        [InlineKeyboardButton("⭐ Proveedores Destacados", callback_data="destacados")],
+        [InlineKeyboardButton("❓ Ayuda", callback_data="ayuda")]
+    ]
+    
+    if es_admin:
+        teclado.append([InlineKeyboardButton("🔧 Admin", callback_data="admin_panel")])
+    
+    mensaje = f"🏥 **MediCuba**\n🩺 Tu salud, nuestra prioridad\n\n📍 **Tu provincia:** {provincia}\n\n¿Qué deseas hacer?"
+    
+    await update.callback_query.edit_message_text(
+        mensaje,
+        reply_markup=InlineKeyboardMarkup(teclado),
+        parse_mode="Markdown"
+    )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start - Inicio del bot"""
-    usuario_id = str(update.effective_user.id)
+    """Inicio del bot - maneja links personalizados"""
+    user_id = str(update.effective_user.id)
     
-    if usuario_id in datos["usuarios"] and datos["usuarios"][usuario_id].get("provincia"):
-        provincia = datos["usuarios"][usuario_id]["provincia"]
-        mensaje = (
-            f"✅ ¡Bienvenido de vuelta!\n"
-            f"Tu provincia guardada es: {provincia}\n\n"
-            f"Usa /buscar [medicina] para encontrar contactos.\n\n"
-            f"Ejemplo: /buscar paracetamol"
-        )
-        await update.message.reply_text(mensaje)
-        return ConversationHandler.END
+    # Verificar si es un link personalizado de proveedor
+    if context.args and context.args[0].startswith("proveedor_"):
+        proveedor_id = context.args[0].replace("proveedor_", "")
+        if proveedor_id in datos["proveedores"]:
+            # Mostrar catálogo del proveedor
+            await mostrar_catalogo_proveedor(update, proveedor_id)
+            return
     
-    lista_provincias = "\n".join([f"{i+1}. {p}" for i, p in enumerate(datos["provincias"])])
-    mensaje = (
-        f"🌍 ¡Bienvenido a Medicinas Cuba Bot!\n\n"
-        f"¿De qué provincia eres?\n\n{lista_provincias}\n\n"
-        f"Responde con el NÚMERO de tu provincia:"
-    )
-    await update.message.reply_text(mensaje)
-    return PROVINCIA
-
-async def seleccionar_provincia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Guarda la provincia seleccionada"""
-    usuario_id = str(update.effective_user.id)
-    texto = update.message.text.strip()
-    
-    try:
-        numero = int(texto)
-        if 1 <= numero <= len(datos["provincias"]):
-            provincia = datos["provincias"][numero - 1]
-            
-            async with datos_lock:
-                if usuario_id not in datos["usuarios"]:
-                    datos["usuarios"][usuario_id] = {}
-                datos["usuarios"][usuario_id]["provincia"] = provincia
-                guardar_datos(datos)
-            
-            mensaje = (
-                f"✅ Provincia guardada: {provincia}\n\n"
-                f"Ahora puedes buscar medicinas con:\n"
-                f"/buscar [nombre]\n\n"
-                f"Ejemplo: /buscar paracetamol"
-            )
-            await update.message.reply_text(mensaje)
-            return ConversationHandler.END
-        else:
-            await update.message.reply_text(
-                f"Número inválido. Elige entre 1 y {len(datos['provincias'])}"
-            )
-            return PROVINCIA
-    except ValueError:
-        await update.message.reply_text(
-            "Por favor, envía solo el NÚMERO de tu provincia (ejemplo: 14 para Santiago de Cuba)"
-        )
-        return PROVINCIA
-
-async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancela la conversación"""
-    await update.message.reply_text("Operación cancelada. Usa /start cuando quieras comenzar.")
-    return ConversationHandler.END
-
-async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /buscar - Busca una medicina"""
-    usuario_id = str(update.effective_user.id)
-    
-    if usuario_id not in datos["usuarios"] or not datos["usuarios"][usuario_id].get("provincia"):
-        await update.message.reply_text("❌ Primero debes configurar tu provincia. Usa /start")
-        return
-    
-    if not context.args:
-        await update.message.reply_text("❌ Escribe el nombre de la medicina.\nEjemplo: /buscar paracetamol")
-        return
-    
-    medicina = " ".join(context.args).lower().strip()
-    provincia_usuario = datos["usuarios"][usuario_id]["provincia"]
-    
-    # Búsqueda flexible (coincidencia parcial)
-    resultados = []
-    for med_key in datos["medicamentos"]:
-        if medicina == med_key or medicina in med_key or med_key in medicina:
-            resultados.append(med_key)
-    
-    if not resultados:
-        disponibles = ", ".join(datos["medicamentos"].keys())
-        mensaje = (
-            f"❌ No encontré '{medicina}' en mi base de datos.\n\n"
-            f"💡 Medicinas disponibles: {disponibles}\n\n"
-            f"Si conoces esta medicina, escribe /reportar {medicina}"
-        )
-        await update.message.reply_text(mensaje)
-        return
-    
-    # Si hay múltiples coincidencias, priorizar la exacta
-    medicina_key = resultados[0]
-    if len(resultados) > 1:
-        exactas = [r for r in resultados if r == medicina]
-        if exactas:
-            medicina_key = exactas[0]
-    
-    contactos = datos["medicamentos"][medicina_key]["contactos"]
-    contactos_filtrados = [c for c in contactos if c["provincia"] == provincia_usuario]
-    
-    if not contactos_filtrados:
-        await update.message.reply_text(
-            f"❌ No hay contactos para '{medicina_key}' en {provincia_usuario}\n\n"
-            f"Prueba otra provincia con /cambiar_provincia"
-        )
-        return
-    
-    mensaje = f"🔍 {medicina_key.upper()} en {provincia_usuario}\n\n"
-    mensaje += f"✅ Encontré {len(contactos_filtrados)} contacto(s):\n\n"
-    
-    for i, c in enumerate(contactos_filtrados, 1):
-        zona = c.get('zona', 'Sin zona')
-        mensaje += f"{i}. 📱 {c['telefono']}\n   📍 {zona}\n   🕒 {c['fecha']}\n\n"
-    
-    mensaje += "---\n💬 Contacta directamente por WhatsApp o Telegram"
-    
-    await update.message.reply_text(mensaje)
-
-async def cambiar_provincia(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /cambiar_provincia - Cambia la provincia del usuario"""
-    lista_provincias = "\n".join([f"{i+1}. {p}" for i, p in enumerate(datos["provincias"])])
-    mensaje = f"📍 Cambiar provincia\n\n{lista_provincias}\n\nResponde con el NÚMERO de tu nueva provincia:"
-    await update.message.reply_text(mensaje)
-    return PROVINCIA
-
-async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /ayuda - Muestra ayuda"""
-    mensaje = (
-        "📚 AYUDA - Medicinas Cuba Bot\n\n"
-        "Comandos disponibles:\n"
-        "/start - Iniciar o configurar provincia\n"
-        "/buscar [medicina] - Buscar contactos\n"
-        "/cambiar_provincia - Cambiar tu provincia\n"
-        "/reportar [medicina] - Reportar medicina faltante\n"
-        "/ayuda - Mostrar esta ayuda\n\n"
-        "Ejemplos:\n"
-        "/buscar paracetamol\n"
-        "/buscar ibuprofeno\n\n"
-        "Nota: Este bot recopila información pública.\n"
-        "Siempre verifica antes de comprar."
-    )
-    await update.message.reply_text(mensaje)
-
-async def reportar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /reportar - Reportar una medicina que falta"""
-    if not context.args:
-        await update.message.reply_text("Ejemplo: /reportar paracetamol 500mg\n\nAsí puedo agregar esta medicina a la base de datos.")
-        return
-    
-    medicina = " ".join(context.args)
-    usuario_id = str(update.effective_user.id)
-    
-    async with datos_lock:
-        if "reportes" not in datos:
-            datos["reportes"] = []
-        datos["reportes"].append({
-            "medicina": medicina,
-            "usuario_id": usuario_id
-        })
+    # Registrar cliente si no existe
+    if user_id not in datos["clientes"]:
+        datos["clientes"][user_id] = {}
         guardar_datos(datos)
     
-    await update.message.reply_text(f"✅ Gracias por reportar '{medicina}'. Lo revisaré para agregarlo próximamente.")
-
-# ===== CONFIGURACIÓN DEL BOT =====
-
-def main():
-    """Función principal que inicia el bot"""
-    # Token del bot
-    TOKEN = "8685939368:AAESfgUVeQG0qA8521Qx5LO_7Qm3LY27Qq0"
+    # Mostrar menú principal
+    teclado = []
+    provincia = datos["clientes"].get(user_id, {}).get("provincia", "No seleccionada")
+    es_admin = int(user_id) in datos["administradores"]
     
-    # Crear la aplicación
-    application = Application.builder().token(TOKEN).build()
+    teclado = [
+        [InlineKeyboardButton("🔍 Buscar Medicina", callback_data="buscar")],
+        [InlineKeyboardButton("📝 Publicar Catálogo", callback_data="publicar")],
+        [InlineKeyboardButton("📍 Cambiar Provincia", callback_data="cambiar_provincia")],
+        [InlineKeyboardButton("👤 Mi Perfil", callback_data="mi_perfil")],
+        [InlineKeyboardButton("⭐ Proveedores Destacados", callback_data="destacados")],
+        [InlineKeyboardButton("❓ Ayuda", callback_data="ayuda")]
+    ]
     
-    # Conversación UNIFICADA para start y cambiar_provincia
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CommandHandler("cambiar_provincia", cambiar_provincia),
-        ],
-        states={
-            PROVINCIA: [MessageHandler(filters.TEXT & ~filters.COMMAND, seleccionar_provincia)],
-        },
-        fallbacks=[CommandHandler("cancelar", cancelar)]
+    if es_admin:
+        teclado.append([InlineKeyboardButton("🔧 Admin", callback_data="admin_panel")])
+    
+    mensaje = f"🏥 **MediCuba**\n🩺 Tu salud, nuestra prioridad\n\n📍 **Tu provincia:** {provincia}\n\n¿Qué deseas hacer?"
+    
+    await update.message.reply_text(
+        mensaje,
+        reply_markup=InlineKeyboardMarkup(teclado),
+        parse_mode="Markdown"
+    )
+
+async def mostrar_catalogo_proveedor(update: Update, proveedor_id):
+    """Muestra el catálogo de un proveedor específico"""
+    proveedor = datos["proveedores"].get(proveedor_id)
+    if not proveedor:
+        await update.message.reply_text("❌ Proveedor no encontrado.")
+        return
+    
+    medicinas = [m for m in datos["medicinas"] if m["proveedor_id"] == proveedor_id]
+    
+    if not medicinas:
+        await update.message.reply_text(f"📭 {proveedor.get('nombre', 'Proveedor')} no tiene medicinas disponibles.")
+        return
+    
+    mensaje = f"🏥 **{proveedor.get('nombre', 'Proveedor')}**\n"
+    if proveedor.get("destacado_hasta"):
+        mensaje += "⭐ **Proveedor Destacado** ⭐\n"
+    mensaje += f"📞 **Contacto:** {proveedor.get('contacto_mostrar', 'No especificado')}\n"
+    mensaje += "─" * 20 + "\n\n**📋 Catálogo:**\n"
+    
+    for m in medicinas[:20]:
+        mg = f" ({m['mg']})" if m.get('mg') else ""
+        precio = f" - {m['precio']} CUP" if m.get('precio') else ""
+        mensaje += f"• {m['nombre_original']}{mg}{precio}\n"
+    
+    mensaje += "\n─" * 20 + "\n🩺 **MediCuba** - Encuentra más proveedores en @MediCubaBot"
+    
+    await update.message.reply_text(mensaje, parse_mode="Markdown")
+
+async def botones_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja los botones del menú"""
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    
+    if query.data == "buscar":
+        context.user_data["estado"] = "esperando_medicina"
+        await query.edit_message_text(
+            "🔍 **Buscar Medicina**\n\nEscribe el nombre de la medicina que buscas:\n\n*Ejemplo:* `paracetamol`",
+            parse_mode="Markdown"
+        )
+    
+    elif query.data == "publicar":
+        context.user_data["estado"] = "esperando_listado"
+        await query.edit_message_text(
+            "📝 **Publicar Catálogo**\n\n📋 **Instrucciones:**\n"
+            "1. Copia tu listado de WhatsApp\n"
+            "2. Pégalo aquí\n\n"
+            "El bot extraerá automáticamente todas las medicinas.\n\n"
+            "⚠️ *Si ya tienes un catálogo, este lo reemplazará.*",
+            parse_mode="Markdown"
+        )
+    
+    elif query.data == "cambiar_provincia":
+        context.user_data["estado"] = "cambiando_provincia"
+        lista = "\n".join([f"{i+1}. {p}" for i, p in enumerate(datos["provincias"])])
+        await query.edit_message_text(
+            f"📍 **Cambiar Provincia**\n\n{lista}\n\nResponde con el NÚMERO de tu provincia:",
+            parse_mode="Markdown"
+        )
+    
+    elif query.data == "mi_perfil":
+        await mi_perfil(query, user_id)
+    
+    elif query.data == "destacados":
+        await mostrar_destacados(query)
+    
+    elif query.data == "ayuda":
+        await mostrar_ayuda(query)
+    
+    elif query.data == "admin_panel":
+        if int(user_id) in datos["administradores"]:
+            await admin_panel(query)
+        else:
+            await query.edit_message_text("❌ No tienes permisos de administrador.")
+
+async def mi_perfil(query, user_id):
+    """Muestra el perfil del usuario"""
+    es_proveedor = user_id in datos["proveedores"]
+    
+    if es_proveedor:
+        proveedor = datos["proveedores"][user_id]
+        catalogo_count = len([m for m in datos["medicinas"] if m["proveedor_id"] == user_id])
+        mensaje = f"👤 **Mi Perfil (Proveedor)**\n\n"
+        mensaje += f"📛 **Nombre:** {proveedor.get('nombre', 'No especificado')}\n"
+        mensaje += f"📞 **Contacto:** {proveedor.get('contacto_mostrar', 'No especificado')}\n"
+        mensaje += f"📋 **Catálogo:** {catalogo_count} medicinas\n"
+        if proveedor.get('link_token'):
+            mensaje += f"🔗 **Link personalizado:** `t.me/MediCubaBot?start=proveedor_{user_id}`\n"
+        mensaje += "\n¿Qué deseas hacer?\n\n"
+        teclado = [
+            [InlineKeyboardButton("✏️ Editar Contacto", callback_data="editar_contacto")],
+            [InlineKeyboardButton("📋 Ver Mi Catálogo", callback_data="ver_mi_catalogo")],
+            [InlineKeyboardButton("🔙 Volver", callback_data="volver")]
+        ]
+        await query.edit_message_text(mensaje, reply_markup=InlineKeyboardMarkup(teclado), parse_mode="Markdown")
+    else:
+        cliente = datos["clientes"].get(user_id, {})
+        mensaje = f"👤 **Mi Perfil (Cliente)**\n\n"
+        mensaje += f"📍 **Provincia:** {cliente.get('provincia', 'No seleccionada')}\n"
+        mensaje += f"📊 **Búsquedas realizadas:** {cliente.get('busquedas', 0)}\n\n"
+        teclado = [[InlineKeyboardButton("🔙 Volver", callback_data="volver")]]
+        await query.edit_message_text(mensaje, reply_markup=InlineKeyboardMarkup(teclado), parse_mode="Markdown")
+
+async def mostrar_destacados(query):
+    """Muestra proveedores destacados"""
+    destacados = [p_id for p_id, p in datos["proveedores"].items() if p.get("destacado_hasta") and datetime.now() < datetime.fromisoformat(p["destacado_hasta"])]
+    
+    if not destacados:
+        await query.edit_message_text(
+            "⭐ **Proveedores Destacados**\n\nPor el momento no hay proveedores destacados.\n\n¿Quieres aparecer aquí? Contacta al administrador.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    mensaje = "⭐ **PROVEEDORES DESTACADOS** ⭐\n\n"
+    for p_id in destacados[:5]:
+        p = datos["proveedores"][p_id]
+        mensaje += f"🏥 **{p.get('nombre', 'Proveedor')}**\n📞 {p.get('contacto_mostrar', '')}\n🔗 [Ver catálogo](t.me/MediCubaBot?start=proveedor_{p_id})\n\n"
+    
+    teclado = [[InlineKeyboardButton("🔙 Volver", callback_data="volver")]]
+    await query.edit_message_text(mensaje, reply_markup=InlineKeyboardMarkup(teclado), parse_mode="Markdown", disable_web_page_preview=True)
+
+async def mostrar_ayuda(query):
+    """Muestra ayuda dividida por perfiles"""
+    teclado = [
+        [InlineKeyboardButton("👨‍💼 Para Proveedores", callback_data="ayuda_proveedores")],
+        [InlineKeyboardButton("🛒 Para Clientes", callback_data="ayuda_clientes")],
+        [InlineKeyboardButton("⚙️ General", callback_data="ayuda_general")],
+        [InlineKeyboardButton("🔙 Volver", callback_data="volver")]
+    ]
+    await query.edit_message_text(
+        "❓ **Centro de Ayuda**\n\n¿Qué tipo de ayuda necesitas?",
+        reply_markup=InlineKeyboardMarkup(teclado),
+        parse_mode="Markdown"
+    )
+
+async def admin_panel(query):
+    """Panel de administración"""
+    teclado = [
+        [InlineKeyboardButton("📥 Cargar Listado (Admin)", callback_data="admin_cargar")],
+        [InlineKeyboardButton("📊 Estadísticas", callback_data="admin_estadisticas")],
+        [InlineKeyboardButton("👥 Ver Proveedores", callback_data="admin_proveedores")],
+        [InlineKeyboardButton("⭐ Destacar Proveedor", callback_data="admin_destacar")],
+        [InlineKeyboardButton("🔙 Volver", callback_data="volver")]
+    ]
+    await query.edit_message_text(
+        "🔧 **Panel de Administración**\n\n¿Qué deseas gestionar?",
+        reply_markup=InlineKeyboardMarkup(teclado),
+        parse_mode="Markdown"
+    )
+
+# ===== MANEJADORES DE MENSAJES =====
+
+async def procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Procesa mensajes de texto según el estado"""
+    user_id = str(update.effective_user.id)
+    texto = update.message.text
+    estado = context.user_data.get("estado")
+    
+    if estado == "esperando_medicina":
+        # Buscar medicina
+        medicina_buscar = normalizar_texto(texto)
+        provincia = datos["clientes"].get(user_id, {}).get("provincia")
+        
+        if not provincia:
+            await update.message.reply_text("❌ Primero configura tu provincia con /start")
+            return
+        
+        resultados = [m for m in datos["medicinas"] if medicina_buscar in m["nombre"] and m["provincia"] == provincia]
+        
+        if not resultados:
+            await update.message.reply_text(
+                f"❌ No encontré '{texto}' en {provincia}.\n\n💡 Sugerencias:\n• Revisa la ortografía\n• Prueba con otro nombre\n• Los proveedores pueden publicar su catálogo con /start"
+            )
+        else:
+            # Agrupar por proveedor
+            por_proveedor = {}
+            for r in resultados:
+                if r["proveedor_id"] not in por_proveedor:
+                    por_proveedor[r["proveedor_id"]] = []
+                por_proveedor[r["proveedor_id"]].append(r)
+            
+            mensaje = f"🔍 **{texto.upper()}** en {provincia}\n\n✅ Encontré {len(resultados)} coincidencias:\n\n"
+            
+            for p_id, items in list(por_proveedor.items())[:5]:
+                p = datos["proveedores"].get(p_id, {})
+                destacado = "⭐ " if p.get("destacado_hasta") and datetime.now() < datetime.fromisoformat(p["destacado_hasta"]) else ""
+                mensaje += f"{destacado}**Proveedor:** {p.get('nombre', 'Anónimo')}\n"
+                mensaje += f"📞 {p.get('contacto_mostrar', 'No disponible')}\n"
+                for item in items[:3]:
+                    mg = f" ({item['mg']})" if item.get('mg') else ""
+                    precio = f" - {item['precio']} CUP" if item.get('precio') else ""
+                    mensaje += f"   • {item['nombre_original']}{mg}{precio}\n"
+                mensaje += "\n"
+            
+            # Botón de contacto con mensaje pre-escrito
+            primer_proveedor = list(por_proveedor.keys())[0]
+            contacto = datos["proveedores"].get(primer_proveedor, {}).get("contacto")
+            if contacto and contacto.get("tipo") in ["whatsapp", "ambos"]:
+                telefono = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
+                mensaje_pre = f"🩺 Hola, te contacto a través de MediCuba (t.me/MediCubaBot). ¿Tienes disponible {texto}?"
+                enlace = f"https://wa.me/{telefono}?text={mensaje_pre.replace(' ', '%20')}"
+                teclado = [[InlineKeyboardButton("📞 Contactar Proveedor", url=enlace)]]
+                await update.message.reply_text(mensaje, reply_markup=InlineKeyboardMarkup(teclado), parse_mode="Markdown")
+            else:
+                await update.message.reply_text(mensaje, parse_mode="Markdown")
+        
+        context.user_data["estado"] = None
+    
+    elif estado == "esperando_listado":
+        # Procesar listado de medicinas
+        medicinas = extraer_medicinas_desde_texto(texto)
+        
+        if not medicinas:
+            await update.message.reply_text("❌ No pude extraer medicinas de ese texto. Asegúrate de que tenga nombres como en los ejemplos.")
+            return
+        
+        # Guardar o reemplazar catálogo del proveedor
+        if user_id not in datos["proveedores"]:
+            datos["proveedores"][user_id] = {
+                "nombre": update.effective_user.first_name,
+                "contacto": {},
+                "catalogo_activo": True,
+                "fecha_actualizacion": datetime.now().isoformat()
+            }
+        
+        # Eliminar catálogo anterior
+        datos["medicinas"] = [m for m in datos["medicinas"] if m["proveedor_id"] != user_id]
+        
+        # Guardar nuevo catálogo
+        provincia = datos["clientes"].get(user_id, {}).get("provincia", "Santiago de Cuba")
+        for m in medicinas:
+            datos["medicinas"].append({
+                "nombre": m["nombre"],
+                "nombre_original": m["nombre_original"],
+                "mg": m.get("mg"),
+                "precio": m.get("precio"),
+                "proveedor_id": user_id,
+                "provincia": provincia,
+                "fecha": datetime.now().isoformat()
+            })
+        
+        # Generar link personalizado
+        datos["proveedores"][user_id]["link_token"] = user_id
+        
+        guardar_datos(datos)
+        
+        # Preguntar forma de contacto
+        context.user_data["estado"] = "esperando_contacto"
+        context.user_data["medicinas_count"] = len(medicinas)
+        
+        teclado = [
+            [InlineKeyboardButton("📱 WhatsApp", callback_data="contacto_whatsapp")],
+            [InlineKeyboardButton("✈️ Telegram", callback_data="contacto_telegram")],
+            [InlineKeyboardButton("📞 Ambos", callback_data="contacto_ambos")]
+        ]
+        await update.message.reply_text(
+            f"✅ Se extrajeron {len(medicinas)} medicinas.\n\nAhora elige cómo prefieres que te contacten:",
+            reply_markup=InlineKeyboardMarkup(teclado)
+        )
+    
+    elif estado == "cambiando_provincia":
+        try:
+            num = int(texto)
+            if 1 <= num <= len(datos["provincias"]):
+                provincia = datos["provincias"][num - 1]
+                if user_id not in datos["clientes"]:
+                    datos["clientes"][user_id] = {}
+                datos["clientes"][user_id]["provincia"] = provincia
+                guardar_datos(datos)
+                await update.message.reply_text(f"✅ Provincia cambiada a: {provincia}")
+            else:
+                await update.message.reply_text(f"Número inválido. Elige entre 1 y {len(datos['provincias'])}")
+        except ValueError:
+            await update.message.reply_text("Envía solo el NÚMERO de la provincia.")
+        
+        context.user_data["estado"] = None
+
+async def procesar_contacto_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja la selección de tipo de contacto"""
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    
+    tipo = query.data.replace("contacto_", "")
+    context.user_data["tipo_contacto"] = tipo
+    
+    if tipo in ["whatsapp", "ambos"]:
+        context.user_data["estado"] = "esperando_telefono"
+        await query.edit_message_text("📱 Escribe tu número de WhatsApp (ej: +53 5 1234567):")
+    elif tipo == "telegram":
+        context.user_data["estado"] = "esperando_telegram"
+        await query.edit_message_text("✈️ Escribe tu @usuario de Telegram:")
+
+async def procesar_telefono(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guarda el teléfono del proveedor"""
+    user_id = str(update.effective_user.id)
+    telefono = update.message.text.strip()
+    tipo = context.user_data.get("tipo_contacto", "whatsapp")
+    
+    if user_id not in datos["proveedores"]:
+        datos["proveedores"][user_id] = {}
+    
+    if "contacto" not in datos["proveedores"][user_id]:
+        datos["proveedores"][user_id]["contacto"] = {}
+    
+    datos["proveedores"][user_id]["contacto"]["tipo"] = tipo
+    if tipo in ["whatsapp", "ambos"]:
+        datos["proveedores"][user_id]["contacto"]["whatsapp"] = telefono
+    
+    if tipo == "ambos":
+        context.user_data["estado"] = "esperando_telegram"
+        await update.message.reply_text("✈️ Ahora escribe tu @usuario de Telegram:")
+    else:
+        # Generar mensaje de contacto
+        contacto_mostrar = telefono if tipo == "whatsapp" else f"@{datos['proveedores'][user_id]['contacto'].get('telegram', '')}"
+        datos["proveedores"][user_id]["contacto_mostrar"] = contacto_mostrar
+        datos["proveedores"][user_id]["nombre"] = update.effective_user.first_name
+        guardar_datos(datos)
+        
+        medicinas_count = context.user_data.get("medicinas_count", 0)
+        link = f"t.me/MediCubaBot?start=proveedor_{user_id}"
+        
+        await update.message.reply_text(
+            f"✅ **¡Catálogo publicado!**\n\n"
+            f"📊 Se registraron {medicinas_count} medicinas.\n"
+            f"📞 Contacto: {contacto_mostrar}\n\n"
+            f"🔗 **Tu link personalizado:**\n`{link}`\n\n"
+            f"⭐ ¿Quieres aparecer como Proveedor Destacado? Contacta al administrador.\n\n"
+            f"🩺 **MediCuba** - Conectando pacientes con proveedores",
+            parse_mode="Markdown"
+        )
+        context.user_data["estado"] = None
+
+async def procesar_telegram(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guarda el @usuario de Telegram"""
+    user_id = str(update.effective_user.id)
+    telegram_user = update.message.text.strip()
+    
+    if not telegram_user.startswith("@"):
+        telegram_user = "@" + telegram_user
+    
+    datos["proveedores"][user_id]["contacto"]["telegram"] = telegram_user
+    
+    tipo = context.user_data.get("tipo_contacto", "telegram")
+    if tipo == "ambos":
+        contacto_mostrar = f"{datos['proveedores'][user_id]['contacto'].get('whatsapp', '')} / {telegram_user}"
+    else:
+        contacto_mostrar = telegram_user
+    
+    datos["proveedores"][user_id]["contacto_mostrar"] = contacto_mostrar
+    datos["proveedores"][user_id]["nombre"] = update.effective_user.first_name
+    guardar_datos(datos)
+    
+    medicinas_count = context.user_data.get("medicinas_count", 0)
+    link = f"t.me/MediCubaBot?start=proveedor_{user_id}"
+    
+    await update.message.reply_text(
+        f"✅ **¡Catálogo publicado!**\n\n"
+        f"📊 Se registraron {medicinas_count} medicinas.\n"
+        f"📞 Contacto: {contacto_mostrar}\n\n"
+        f"🔗 **Tu link personalizado:**\n`{link}`\n\n"
+        f"⭐ ¿Quieres aparecer como Proveedor Destacado? Contacta al administrador.\n\n"
+        f"🩺 **MediCuba** - Conectando pacientes con proveedores",
+        parse_mode="Markdown"
+    )
+    context.user_data["estado"] = None
+
+# ===== COMANDO ADMIN =====
+
+async def admin_cargar_listado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando para que el admin cargue listados manualmente"""
+    user_id = str(update.effective_user.id)
+    
+    if int(user_id) not in datos["administradores"]:
+        await update.message.reply_text("❌ No tienes permisos de administrador.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "📥 **Modo Administrador - Cargar Listado**\n\n"
+            "Uso: `/admin_cargar_listado +5351234567`\n\n"
+            "Luego pega el listado de medicinas.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    telefono = context.args[0]
+    context.user_data["admin_telefono"] = telefono
+    context.user_data["estado"] = "admin_esperando_listado"
+    
+    await update.message.reply_text(
+        f"📥 Teléfono asignado: `{telefono}`\n\nAhora pega el listado de medicinas (como en los ejemplos de WhatsApp):",
+        parse_mode="Markdown"
+    )
+
+async def procesar_admin_listado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Procesa listado cargado por admin"""
+    user_id = str(update.effective_user.id)
+    
+    if int(user_id) not in datos["administradores"]:
+        return
+    
+    texto = update.message.text
+    telefono = context.user_data.get("admin_telefono")
+    estado = context.user_data.get("estado")
+    
+    if estado != "admin_esperando_listado":
+        return
+    
+    medicinas = extraer_medicinas_desde_texto(texto)
+    
+    if not medicinas:
+        await update.message.reply_text("❌ No pude extraer medicinas de ese texto.")
+        return
+    
+    # Crear proveedor admin
+    admin_proveedor_id = f"admin_{user_id}_{int(datetime.now().timestamp())}"
+    datos["proveedores"][admin_proveedor_id] = {
+        "nombre": "Administrador MediCuba",
+        "contacto": {"tipo": "whatsapp", "whatsapp": telefono},
+        "contacto_mostrar": telefono,
+        "catalogo_activo": True,
+        "fecha_actualizacion": datetime.now().isoformat()
+    }
+    
+    # Guardar medicinas
+    for m in medicinas:
+        datos["medicinas"].append({
+            "nombre": m["nombre"],
+            "nombre_original": m["nombre_original"],
+            "mg": m.get("mg"),
+            "precio": m.get("precio"),
+            "proveedor_id": admin_proveedor_id,
+            "provincia": "Santiago de Cuba",
+            "fecha": datetime.now().isoformat()
+        })
+    
+    guardar_datos(datos)
+    
+    await update.message.reply_text(
+        f"✅ **Listado cargado por Administrador**\n\n"
+        f"📊 Se registraron {len(medicinas)} medicinas.\n"
+        f"📞 Teléfono asignado: {telefono}\n"
+        f"📍 Provincia: Santiago de Cuba\n\n"
+        f"Ya están disponibles en las búsquedas.",
+        parse_mode="Markdown"
     )
     
-    # Registrar manejadores
-    application.add_handler(conv_handler)
-    application.add_handler(CommandHandler("buscar", buscar))
-    application.add_handler(CommandHandler("ayuda", ayuda))
-    application.add_handler(CommandHandler("reportar", reportar))
+    context.user_data["estado"] = None
+    context.user_data["admin_telefono"] = None
+
+# ===== MAIN =====
+
+def main():
+    application = Application.builder().token(TOKEN).build()
     
-    # Iniciar el bot
-    print("🤖 Bot iniciado... Esperando mensajes")
+    # Manejadores de comandos
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin_cargar_listado", admin_cargar_listado))
+    
+    # Manejadores de callbacks (botones)
+    application.add_handler(CallbackQueryHandler(botones_callback))
+    application.add_handler(CallbackQueryHandler(procesar_contacto_callback, pattern="^contacto_"))
+    
+    # Manejadores de mensajes
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_texto))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_telefono, block=False))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_telegram, block=False))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_admin_listado, block=False))
+    
+    print("🤖 MediCuba Bot iniciado...")
     application.run_polling()
 
 if __name__ == "__main__":
