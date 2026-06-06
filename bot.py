@@ -1,6 +1,6 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v2.8.0 | Fuzzy Matching | Carrusel Anuncios | Admin Enumerados
+v2.8.0 | Fuzzy Matching | Carrusel Anuncios | Admin Enumerados | Conteo Provincias
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -99,6 +99,20 @@ async def limpiar_expirados():
         if r.deleted_count: logger.info(f"🗑️ Purgados {r.deleted_count} expirados")
     except: pass
 
+async def get_lineas_por_provincia():
+    try:
+        pipeline = [
+            {"$match": {"lineas_originales": {"$exists": True}}},
+            {"$project": {"provincia": 1, "count": {"$size": "$lineas_originales"}}},
+            {"$group": {"_id": "$provincia", "total": {"$sum": "$count"}}}
+        ]
+        results = {}
+        async for doc in coleccion_catalogos.aggregate(pipeline):
+            if doc["_id"]: results[doc["_id"]] = doc["total"]
+        return results
+    except:
+        return {}
+
 # ===== MENÚS =====
 def menu_principal(uid, prov, anuncio_idx=0):
     a_list = datos.get("anuncios", [])
@@ -106,7 +120,7 @@ def menu_principal(uid, prov, anuncio_idx=0):
     tk_anuncio = []
     
     if a_list:
-        msg_anuncio = f"📢 <b>AVISO:</b> {a_list[anuncio_idx]}\n\n"
+        msg_anuncio = f"📢 {a_list[anuncio_idx]}\n\n"
         if len(a_list) > 1:
             prev_idx = (anuncio_idx - 1) % len(a_list)
             next_idx = (anuncio_idx + 1) % len(a_list)
@@ -116,7 +130,7 @@ def menu_principal(uid, prov, anuncio_idx=0):
                 InlineKeyboardButton("➡️", callback_data=f"anuncio_{next_idx}")
             ])
 
-    tk = tk_anuncio + [
+    tk = [
         [InlineKeyboardButton("🔍 Buscar Medicina", callback_data="buscar")],
         [InlineKeyboardButton("📝 Publicar Catálogo", callback_data="publicar")],
         [InlineKeyboardButton("📍 Cambiar Provincia", callback_data="cambiar_provincia")],
@@ -126,8 +140,14 @@ def menu_principal(uid, prov, anuncio_idx=0):
     ]
     if es_admin(uid): tk.append([InlineKeyboardButton("🔧 Admin", callback_data="admin_panel")])
     
-    t = f"{msg_anuncio}🏥 <b>MediCuba</b>\n🩺 Tu salud, nuestra prioridad\n\n📍 <b>Provincia:</b> {esc(prov)}\n\n🔗 <code>t.me/MediCubaBot</code>\n\n¿Qué deseas hacer?\n\n<i>MediCuba {VERSION}</i>"
-    return t, InlineKeyboardMarkup(tk)
+    final_tk = tk_anuncio + tk
+    
+    ver = VERSION.replace('v', '')
+    link_str = "t.me/MediCubaBot"
+    padded_link = link_str + " " * max(1, 28 - len(link_str)) + ver
+    
+    t = f"{msg_anuncio}🏥 <b>MediCuba</b>\n🩺 Tu salud, nuestra prioridad\n\n📍 <b>Provincia:</b> {esc(prov)}\n\n<code>{padded_link}</code>"
+    return t, InlineKeyboardMarkup(final_tk)
 
 def menu_post_busqueda():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar"), InlineKeyboardButton("🏠 Menú", callback_data="volver")]])
@@ -167,7 +187,8 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def forzar_prov(update, context):
     context.user_data["estado"] = "cambiando_provincia"
-    lista = "\n".join([f"{i+1}. {p}" for i, p in enumerate(PROVINCIAS)])
+    conteos = await get_lineas_por_provincia()
+    lista = "\n".join([f"{i+1}. {p} ({conteos.get(p, 0)})" for i, p in enumerate(PROVINCIAS)])
     await update.message.reply_text(f"👋 ¡Bienvenido!\n\n📍 Selecciona:\n\n{lista}\n\nNÚMERO:", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True))
 
 async def mostrar_cat_prov(update, pid):
@@ -209,7 +230,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(uid, "📋 Pega tu listado (máx 80 líneas, 2 catálogos, solo medicinas).", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"], ["❌ Cancelar"]], resize_keyboard=True), parse_mode="HTML")
     elif d == "cambiar_provincia":
         context.user_data["estado"] = "cambiando_provincia"
-        lista = "\n".join([f"{i+1}. {p}" for i, p in enumerate(PROVINCIAS)])
+        conteos = await get_lineas_por_provincia()
+        lista = "\n".join([f"{i+1}. {p} ({conteos.get(p, 0)})" for i, p in enumerate(PROVINCIAS)])
         await q.edit_message_text("📍 <b>Cambiar Provincia</b>", parse_mode="HTML")
         await context.bot.send_message(uid, f"{lista}\n\nNÚMERO:", reply_markup=tv)
     elif d == "mi_perfil": await _perfil(q, uid)
@@ -391,7 +413,7 @@ async def _admin_add_id_msg(update, context, uid, txt):
     context.user_data["estado"] = None
     await enviar_menu_msg(update, uid)
 
-# ===== BÚSQUEDA (Botones diferenciados por nombre de proveedor) =====
+# ===== BÚSQUEDA =====
 async def _busqueda(update, context, uid, txt):
     mb = normalizar_texto(txt)
     c = await coleccion_clientes.find_one({"_id": uid})
@@ -562,7 +584,6 @@ async def _admin_list(update, context, uid, txt):
     lns = [l.strip() for l in txt.split('\n') if l.strip()][:MAX_LINEAS_CATALOGO]
     lns_n = [normalizar_texto(l) for l in lns]
     
-    # Lógica de enumeración de Admin
     num_admin = datos.get("siguiente_num_admin", 1)
     nombre_admin = f"{num_admin} Admin MediCuba"
     
@@ -571,7 +592,6 @@ async def _admin_list(update, context, uid, txt):
     exp = datetime.now() + timedelta(days=DIAS_EXPIRACION_ADMIN)
     await coleccion_catalogos.insert_one({"proveedor_id": apid, "lineas_originales": lns, "lineas_normalizadas": lns_n, "es_admin": True, "fecha_creacion": datetime.now(), "fecha_expiracion": exp, "provincia": "Santiago de Cuba", "hash": h})
     
-    # Actualizar el contador para el próximo admin
     datos["siguiente_num_admin"] = num_admin + 1
     guardar_config(datos)
     
