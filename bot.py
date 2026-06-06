@@ -6,6 +6,7 @@ Compatible con Python 3.14 y python-telegram-bot v21+
 
 import logging
 import os
+import re
 import html
 import asyncio
 import hashlib
@@ -13,7 +14,7 @@ import threading
 import signal
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -68,7 +69,9 @@ def normalizar_texto(texto):
     texto = texto.lower()
     acentos = {'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u', 'ü': 'u'}
     for a, b in acentos.items(): texto = texto.replace(a, b)
-    return texto
+    # Eliminar emojis, símbolos y puntuación para que la búsqueda sea perfecta
+    texto = re.sub(r'[^\w\s]', '', texto)
+    return texto.strip()
 
 def es_admin(user_id):
     return int(user_id) in [ADMIN_ID]
@@ -119,6 +122,7 @@ async def enviar_menu_mensaje(update, user_id):
     provincia_doc = await coleccion_clientes.find_one({"_id": user_id})
     provincia = provincia_doc.get("provincia", "No seleccionada") if provincia_doc else "No seleccionada"
     texto, teclado = generar_menu_principal(user_id, provincia)
+    # Remover teclado de texto si existe al volver al menú
     await update.message.reply_text(texto, reply_markup=teclado, parse_mode="HTML")
 
 # ===== COMANDOS BÁSICOS =====
@@ -145,12 +149,14 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando para desbloquear el bot si está esperando un texto"""
     context.user_data["estado"] = None
     user_id = str(update.effective_user.id)
+    await update.message.reply_text("↩️ Operación cancelada.", reply_markup=ReplyKeyboardRemove())
     await enviar_menu_mensaje(update, user_id)
 
 async def forzar_provincia(update, context):
     context.user_data["estado"] = "cambiando_provincia"
     lista = "\n".join([f"{i+1}. {p}" for i, p in enumerate(PROVINCIAS)])
-    await update.message.reply_text(f"👋 ¡Bienvenido a MediCuba!\n\n📍 Primero debes seleccionar tu provincia:\n\n{lista}\n\nResponde con el NÚMERO:")
+    teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
+    await update.message.reply_text(f"👋 ¡Bienvenido a MediCuba!\n\n📍 Primero debes seleccionar tu provincia:\n\n{lista}\n\nResponde con el NÚMERO:", reply_markup=teclado_volver, parse_mode="HTML")
 
 async def mostrar_catalogo_proveedor_msg(update, proveedor_id):
     proveedor = await coleccion_proveedores.find_one({"_id": proveedor_id})
@@ -180,20 +186,27 @@ async def manejador_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = str(query.from_user.id)
     data = query.data
 
-    if data == "volver": await enviar_menu_callback(query, user_id)      
+    teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
+
+    if data == "volver": 
+        await enviar_menu_callback(query, user_id)      
     elif data == "buscar":
         cliente = await coleccion_clientes.find_one({"_id": user_id})
         if not cliente or not cliente.get("provincia"):
             return await query.edit_message_text("❌ Primero configura tu provincia.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📍 Configurar", callback_data="cambiar_provincia")]]))
         context.user_data["estado"] = "esperando_medicina"
-        await query.edit_message_text("🔍 <b>Buscar Medicina</b>\n\nEscribe el nombre (acepta errores ortográficos):\n\n<i>Ej:</i> <code>parasetamol</code>", parse_mode="HTML")  
+        await query.edit_message_text("🔍 <b>Buscar Medicina</b>\n\nEscribe el nombre (acepta errores ortográficos):\n\n<i>Ej:</i> <code>parasetamol</code>", parse_mode="HTML")
+        # Enviar teclado de volver por separado
+        await context.bot.send_message(chat_id=user_id, text="⬇️ Escribe la medicina o presiona Volver:", reply_markup=teclado_volver)  
     elif data == "publicar":
         context.user_data["estado"] = "esperando_listado"
-        await query.edit_message_text("📝 <b>Publicar Catálogo</b>\n\n📋 Pega aquí tu listado.\n\n⚠️ <b>Reglas:</b>\n• Máximo 80 líneas por catálogo.\n• Puedes tener hasta <b>2 catálogos activos</b>.\n• Si subes un 3ro, el más antiguo se elimina.\n• Solo medicinas (sin ropa, comida, etc).\n\n<i>Para cancelar escribe /cancelar</i>", parse_mode="HTML")   
+        await query.edit_message_text("📝 <b>Publicar Catálogo</b>\n\n📋 Pega aquí tu listado.\n\n⚠️ <b>Reglas:</b>\n• Máximo 80 líneas por catálogo.\n• Puedes tener hasta <b>2 catálogos activos</b>.\n• Si subes un 3ro, el más antiguo se elimina.\n• Solo medicinas (sin ropa, comida, etc).", parse_mode="HTML")
+        await context.bot.send_message(chat_id=user_id, text="⬇️ Pega tu listado o presiona Volver:", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"], ["❌ Cancelar"]], resize_keyboard=True))   
     elif data == "cambiar_provincia":
         context.user_data["estado"] = "cambiando_provincia"
         lista = "\n".join([f"{i+1}. {p}" for i, p in enumerate(PROVINCIAS)])
-        await query.edit_message_text(f"📍 <b>Cambiar Provincia</b>\n\n{lista}\n\nResponde con el NÚMERO:", parse_mode="HTML")    
+        await query.edit_message_text(f"📍 <b>Cambiar Provincia</b>\n\n{lista}\n\nResponde con el NÚMERO:", parse_mode="HTML")
+        await context.bot.send_message(chat_id=user_id, text="⬇️ Escribe el número o presiona Volver:", reply_markup=teclado_volver)    
     elif data == "mi_perfil": await _mostrar_perfil(query, user_id)     
     elif data == "editar_contacto":
         context.user_data["editando_contacto"] = True
@@ -262,12 +275,15 @@ async def _mostrar_ayuda_detalle(query, data):
 async def _procesar_contacto_callback(query, context, data):
     tipo = data.replace("contacto_", "")
     context.user_data["tipo_contacto"] = tipo
+    teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
     if tipo in ["whatsapp", "ambos"]:
         context.user_data["estado"] = "esperando_telefono"
-        await query.edit_message_text("📱 Escribe tu WhatsApp (ej: <code>+53 5 1234567</code>):\n\n<i>Para cancelar escribe /cancelar</i>", parse_mode="HTML")
+        await query.edit_message_text("📱 Escribe tu WhatsApp (ej: <code>+53 5 1234567</code>):", parse_mode="HTML")
+        await context.bot.send_message(chat_id=query.from_user.id, text="⬇️ Escribe el número o presiona Volver:", reply_markup=teclado_volver)
     else:
         context.user_data["estado"] = "esperando_telegram"
-        await query.edit_message_text("✈️ Escribe tu @usuario de Telegram:\n\n<i>Para cancelar escribe /cancelar</i>")
+        await query.edit_message_text("✈️ Escribe tu @usuario de Telegram:", parse_mode="HTML")
+        await context.bot.send_message(chat_id=query.from_user.id, text="⬇️ Escribe el usuario o presiona Volver:", reply_markup=teclado_volver)
 
 async def _admin_panel(query):
     teclado = [[InlineKeyboardButton("📥 Cargar Listado", callback_data="admin_cargar")], [InlineKeyboardButton("📊 Estadísticas", callback_data="admin_stats")], [InlineKeyboardButton("👥 Proveedores", callback_data="admin_provs")], [InlineKeyboardButton("⭐ Destacar", callback_data="admin_dest")], [InlineKeyboardButton("🏠 Volver", callback_data="volver")]]
@@ -304,11 +320,18 @@ async def _admin_dest(query):
 
 # ===== HANDLER ÚNICO DE MENSAJES =====
 async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id = str(update.effective_user.id)
-        texto = update.message.text
-        estado = context.user_data.get("estado")
+    user_id = str(update.effective_user.id)
+    texto = update.message.text
 
+    # SISTEMA GLOBAL DE CANCELACIÓN / VOLVER
+    if texto in ["🔙 Volver al Menú", "❌ Cancelar", "/cancelar", "/cancel"]:
+        context.user_data["estado"] = None
+        await update.message.reply_text("↩️ Operación cancelada.", reply_markup=ReplyKeyboardRemove())
+        return await enviar_menu_mensaje(update, user_id)
+
+    estado = context.user_data.get("estado")
+
+    try:
         if estado == "esperando_medicina": await _busqueda(update, context, user_id, texto)
         elif estado == "esperando_listado": await _listado(update, context, user_id, texto)
         elif estado == "cambiando_provincia": await _cambio_provincia(update, context, user_id, texto)
@@ -316,10 +339,13 @@ async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif estado == "esperando_telegram": await _telegram_user(update, context, user_id, texto)
         elif estado == "admin_esperando_listado": await _admin_listado(update, context, user_id, texto)
         elif estado == "esperando_seleccion": await _seleccion_sugerencia(update, context, user_id, texto)
+        else:
+            await update.message.reply_text("No entendí. Usa los botones del menú.")
     except Exception as e:
         logger.error(f"❌ Error procesando mensaje: {e}")
-        context.user_data["estado"] = None # DESATASCAR AUTOMÁTICAMENTE
-        await update.message.reply_text("⚠️ Ocurrió un error inesperado. Usa /start para volver al menú.")
+        context.user_data["estado"] = None # DESATASCAR
+        await update.message.reply_text(f"⚠️ Ocurrió un error interno: {esc(str(e)[:200])}\n\nVolviendo al menú...", reply_markup=ReplyKeyboardRemove())
+        await enviar_menu_mensaje(update, user_id)
 
 async def _cambio_provincia(update, context, user_id, texto):
     try:
@@ -327,7 +353,7 @@ async def _cambio_provincia(update, context, user_id, texto):
         if 1 <= num <= len(PROVINCIAS):
             prov = PROVINCIAS[num-1]
             await coleccion_clientes.update_one({"_id": user_id}, {"$set": {"provincia": prov}})
-            await update.message.reply_text(f"✅ Provincia: <b>{esc(prov)}</b>", parse_mode="HTML")
+            await update.message.reply_text(f"✅ Provincia: <b>{esc(prov)}</b>", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
             context.user_data["estado"] = None
             return await enviar_menu_mensaje(update, user_id)
         else: raise ValueError
@@ -339,7 +365,9 @@ async def _busqueda(update, context, user_id, texto):
     cliente = await coleccion_clientes.find_one({"_id": user_id})
     provincia = cliente.get("provincia") if cliente else None
 
-    if not provincia: return await update.message.reply_text("❌ Configura tu provincia primero.")
+    if not provincia: 
+        await update.message.reply_text("❌ Configura tu provincia primero.", reply_markup=ReplyKeyboardRemove())
+        return await enviar_menu_mensaje(update, user_id)
 
     await coleccion_clientes.update_one({"_id": user_id}, {"$inc": {"busquedas": 1}})
     await limpiar_expirados()
@@ -358,7 +386,9 @@ async def _busqueda(update, context, user_id, texto):
                 opciones.append({"score": score, "linea_original": cat["lineas_originales"][i], "proveedor": proveedor})
 
     if not opciones:
-        await update.message.reply_text(f"❌ No encontré '{esc(texto)}' en {esc(provincia)}.\n\n💡 Revisa ortografía o prueba otro nombre.", parse_mode="HTML")
+        teclado = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")], [InlineKeyboardButton("🏠 Menú", callback_data="volver")]])
+        await update.message.reply_text(f"❌ No encontré '{esc(texto)}' en {esc(provincia)}.\n\n💡 Revisa ortografía o prueba otro nombre.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("¿Qué deseas hacer?", reply_markup=teclado)
         context.user_data["estado"] = None
         return
 
@@ -383,8 +413,11 @@ async def _busqueda(update, context, user_id, texto):
         
         botones = []
         if enlace_wa: botones.append([InlineKeyboardButton("📞 WhatsApp", url=enlace_wa)])
+        botones.append([InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")])
         botones.append([InlineKeyboardButton("🏠 Menú", callback_data="volver")])
-        await update.message.reply_text(mensaje, reply_markup=InlineKeyboardMarkup(botones), parse_mode="HTML")
+        
+        await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+        await update.message.reply_text("¿Qué deseas hacer?", reply_markup=InlineKeyboardMarkup(botones))
         context.user_data["estado"] = None
     else:
         mensaje = f"🔍 <b>{esc(texto.upper())}</b> - Sugerencias:\n\n"
@@ -392,8 +425,9 @@ async def _busqueda(update, context, user_id, texto):
         context.user_data["sugerencias"] = sugerencias
         for i, op in enumerate(sugerencias, 1):
             mensaje += f"{i}. {esc(op['linea_original'])}\n"
-        mensaje += "\nResponde con el <b>NÚMERO</b> para ver el proveedor, o ignora para buscar otra cosa."
-        await update.message.reply_text(mensaje, parse_mode="HTML")
+        mensaje += "\nResponde con el <b>NÚMERO</b> para ver el proveedor."
+        teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
+        await update.message.reply_text(mensaje, reply_markup=teclado_volver, parse_mode="HTML")
         context.user_data["estado"] = "esperando_seleccion"
 
 async def _seleccion_sugerencia(update, context, user_id, texto):
@@ -410,18 +444,20 @@ async def _seleccion_sugerencia(update, context, user_id, texto):
             if contacto.get("tipo") in ["whatsapp", "ambos"]:
                 tel = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
                 if tel: enlace_wa = f"https://wa.me/{tel}?text=Hola%20te%20contacto%20desde%20MediCuba.%20Tienes%20esto?"
-            botones = [[InlineKeyboardButton("🏠 Menú", callback_data="volver")]]
+            botones = [[InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")], [InlineKeyboardButton("🏠 Menú", callback_data="volver")]]
             if enlace_wa: botones.insert(0, [InlineKeyboardButton("📞 WhatsApp", url=enlace_wa)])
-            await update.message.reply_text(mensaje, reply_markup=InlineKeyboardMarkup(botones), parse_mode="HTML")
+            await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+            await update.message.reply_text("¿Qué deseas hacer?", reply_markup=InlineKeyboardMarkup(botones))
         else: raise ValueError
     except ValueError:
-        await update.message.reply_text("Número inválido. Intenta de nuevo o usa el menú.")
+        await update.message.reply_text("Número inválido. Intenta de nuevo o presiona Volver.")
     context.user_data["estado"] = None
 
 async def _listado(update, context, user_id, texto):
     if contiene_productos_no_medicos(texto):
-        context.user_data["estado"] = None # DESATASCAR
-        return await update.message.reply_text("❌ <b>Listado rechazado.</b>\n\nSe detectaron productos no médicos (ropa, comida, etc). Solo medicinas.", parse_mode="HTML")
+        context.user_data["estado"] = None 
+        await update.message.reply_text("❌ <b>Listado rechazado.</b>\n\nSe detectaron productos no médicos (ropa, comida, etc). Solo medicinas.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+        return await enviar_menu_mensaje(update, user_id)
 
     lineas = [l.strip() for l in texto.split('\n') if l.strip()]
     truncado = len(lineas) > MAX_LINEAS_CATALOGO
@@ -459,7 +495,8 @@ async def _telefono(update, context, user_id, texto):
     await coleccion_proveedores.update_one({"_id": user_id}, {"$set": {"contacto.tipo": tipo, "contacto.whatsapp": telefono, "contacto_mostrar": telefono, "nombre": update.effective_user.first_name or "Prov"}})
     if tipo == "ambos":
         context.user_data["estado"] = "esperando_telegram"
-        return await update.message.reply_text("✈️ Ahora escribe tu @usuario de Telegram:")
+        teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
+        return await update.message.reply_text("✈️ Ahora escribe tu @usuario de Telegram:", reply_markup=teclado_volver)
     await _finalizar_registro(update, context, user_id)
 
 async def _telegram_user(update, context, user_id, texto):
@@ -482,7 +519,8 @@ async def _finalizar_registro(update, context, user_id):
         link = f"t.me/MediCubaBot?start=proveedor_{user_id}"
         mensaje = f"✅ <b>¡Catálogo publicado!</b>\n\n📋 Líneas: {context.user_data.get('medicinas_count', 0)}\n📞 Contacto: {esc(proveedor.get('contacto_mostrar'))}\n\n🔗 <b>Tu link:</b>\n<code>{link}</code>"
     teclado = [[InlineKeyboardButton("🏠 Menú", callback_data="volver")]]
-    await update.message.reply_text(mensaje, reply_markup=InlineKeyboardMarkup(teclado), parse_mode="HTML")
+    await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+    await update.message.reply_text("¿Qué deseas hacer?", reply_markup=InlineKeyboardMarkup(teclado))
     context.user_data["estado"] = None
 
 # ===== COMANDOS ADMIN =====
@@ -492,23 +530,27 @@ async def admin_cargar_listado(update: Update, context: ContextTypes.DEFAULT_TYP
     if not context.args: return await update.message.reply_text("Uso: <code>/admin_cargar_listado +5351234567</code>", parse_mode="HTML")
     context.user_data["admin_telefono"] = context.args[0]
     context.user_data["estado"] = "admin_esperando_listado"
-    await update.message.reply_text("📥 Pega el listado de admin:\n\n<i>Para cancelar escribe /cancelar</i>", parse_mode="HTML")
+    teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"], ["❌ Cancelar"]], resize_keyboard=True)
+    await update.message.reply_text("📥 Pega el listado de admin:", reply_markup=teclado_volver, parse_mode="HTML")
 
 async def _admin_listado(update, context, user_id, texto):
     if not es_admin(user_id): return
     telefono = context.user_data.get("admin_telefono")
     if not telefono: 
-        context.user_data["estado"] = None # DESATASCAR
-        return await update.message.reply_text("❌ Error. Usa /admin_cargar_listado primero.")
+        context.user_data["estado"] = None 
+        await update.message.reply_text("❌ Error. Usa /admin_cargar_listado primero.", reply_markup=ReplyKeyboardRemove())
+        return await enviar_menu_mensaje(update, user_id)
 
     hash_txt = generar_hash(texto)
     if await coleccion_catalogos.find_one({"hash": hash_txt}):
-        context.user_data["estado"] = None # DESATASCAR
-        return await update.message.reply_text("⚠️ <b>Duplicado.</b> Este listado exacto ya existe.", parse_mode="HTML")
+        context.user_data["estado"] = None 
+        await update.message.reply_text("⚠️ <b>Duplicado.</b> Este listado exacto ya existe.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+        return await enviar_menu_mensaje(update, user_id)
 
     if contiene_productos_no_medicos(texto):
-        context.user_data["estado"] = None # DESATASCAR
-        return await update.message.reply_text("❌ Listado contiene productos no médicos.", parse_mode="HTML")
+        context.user_data["estado"] = None 
+        await update.message.reply_text("❌ Listado contiene productos no médicos.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+        return await enviar_menu_mensaje(update, user_id)
 
     lineas = [l.strip() for l in texto.split('\n') if l.strip()][:MAX_LINEAS_CATALOGO]
     lineas_norm = [normalizar_texto(l) for l in lineas]
@@ -525,7 +567,8 @@ async def _admin_listado(update, context, user_id, texto):
         "provincia": provincia, "hash": hash_txt
     })
 
-    await update.message.reply_text(f"✅ <b>Listado Admin cargado</b>\n\n📊 {len(lineas)} líneas.\n📞 {esc(telefono)}\n⏳ Expira: {expiracion.strftime('%Y-%m-%d')}", parse_mode="HTML")
+    await update.message.reply_text(f"✅ <b>Listado Admin cargado</b>\n\n📊 {len(lineas)} líneas.\n📞 {esc(telefono)}\n⏳ Expira: {expiracion.strftime('%Y-%m-%d')}", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+    await enviar_menu_mensaje(update, user_id)
     context.user_data["estado"] = None
     context.user_data["admin_telefono"] = None
 
@@ -559,7 +602,6 @@ def iniciar_health_check():
 
 # ===== MAIN =====
 async def post_init(app):
-    """Limpia webhooks y crea índices en MongoDB al arrancar"""
     logger.info("🧹 Limpiando webhooks y updates pendientes...")
     await app.bot.delete_webhook(drop_pending_updates=True)
     logger.info("🔧 Creando índices en MongoDB...")
