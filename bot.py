@@ -26,7 +26,9 @@ from rapidfuzz import fuzz as rfuzz
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Token leído de forma segura desde Render (NUNCA poner el token directo aquí)
 TOKEN = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID = 814338625
 
 # Constantes del Bot
 MAX_LINEAS_CATALOGO = 80
@@ -128,23 +130,30 @@ async def enviar_menu_mensaje(update, user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
-    # Deep link de proveedor
-    if context.args and context.args[0].startswith("proveedor_"):
-        prov_id = context.args[0].replace("proveedor_", "")
-        await mostrar_catalogo_proveedor_msg(update, prov_id)
-        return
+    try:
+        # Deep link de proveedor
+        if context.args and context.args[0].startswith("proveedor_"):
+            prov_id = context.args[0].replace("proveedor_", "")
+            await mostrar_catalogo_proveedor_msg(update, prov_id)
+            return
 
-    # Registrar o cargar cliente
-    await coleccion_clientes.update_one({"_id": user_id}, {"$setOnInsert": {"provincia": None, "busquedas": 0}}, upsert=True)
-    
-    # Forzar selección de provincia si no la tiene
-    cliente = await coleccion_clientes.find_one({"_id": user_id})
-    if not cliente.get("provincia"):
-        return await forzar_provincia(update)
+        # Registrar o cargar cliente
+        await coleccion_clientes.update_one({"_id": user_id}, {"$setOnInsert": {"provincia": None, "busquedas": 0}}, upsert=True)
+        
+        # Forzar selección de provincia si no la tiene
+        cliente = await coleccion_clientes.find_one({"_id": user_id})
+        if not cliente.get("provincia"):
+            return await forzar_provincia(update, context) # ARREGLADO: Se pasa context
 
-    await enviar_menu_mensaje(update, user_id)
+        await enviar_menu_mensaje(update, user_id)
+        
+    except Exception as e:
+        logger.error(f"❌ Error en /start: {e}")
+        await update.message.reply_text("⚠️ Error al conectar con la base de datos. Intenta más tarde.")
 
-async def forzar_provincia(update):
+# ARREGLADO: Se añade context y se activa el estado
+async def forzar_provincia(update, context):
+    context.user_data["estado"] = "cambiando_provincia"
     lista = "\n".join([f"{i+1}. {p}" for i, p in enumerate(PROVINCIAS)])
     await update.message.reply_text(f"👋 ¡Bienvenido a MediCuba!\n\n📍 Primero debes seleccionar tu provincia:\n\n{lista}\n\nResponde con el NÚMERO:")
 
@@ -324,17 +333,21 @@ async def _admin_dest(query):
 
 # ===== HANDLER ÚNICO DE MENSAJES =====
 async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    texto = update.message.text
-    estado = context.user_data.get("estado")
+    try:
+        user_id = str(update.effective_user.id)
+        texto = update.message.text
+        estado = context.user_data.get("estado")
 
-    if estado == "esperando_medicina": await _busqueda(update, context, user_id, texto)
-    elif estado == "esperando_listado": await _listado(update, context, user_id, texto)
-    elif estado == "cambiando_provincia": await _cambio_provincia(update, context, user_id, texto)
-    elif estado == "esperando_telefono": await _telefono(update, context, user_id, texto)
-    elif estado == "esperando_telegram": await _telegram_user(update, context, user_id, texto)
-    elif estado == "admin_esperando_listado": await _admin_listado(update, context, user_id, texto)
-    elif estado == "esperando_seleccion": await _seleccion_sugerencia(update, context, user_id, texto)
+        if estado == "esperando_medicina": await _busqueda(update, context, user_id, texto)
+        elif estado == "esperando_listado": await _listado(update, context, user_id, texto)
+        elif estado == "cambiando_provincia": await _cambio_provincia(update, context, user_id, texto)
+        elif estado == "esperando_telefono": await _telefono(update, context, user_id, texto)
+        elif estado == "esperando_telegram": await _telegram_user(update, context, user_id, texto)
+        elif estado == "admin_esperando_listado": await _admin_listado(update, context, user_id, texto)
+        elif estado == "esperando_seleccion": await _seleccion_sugerencia(update, context, user_id, texto)
+    except Exception as e:
+        logger.error(f"❌ Error procesando mensaje: {e}")
+        await update.message.reply_text("⚠️ Ocurrió un error interno. Intenta de nuevo o usa /start.")
 
 async def _cambio_provincia(update, context, user_id, texto):
     try:
@@ -407,7 +420,6 @@ async def _busqueda(update, context, user_id, texto):
         await update.message.reply_text(mensaje, reply_markup=InlineKeyboardMarkup(botones), parse_mode="HTML")
         context.user_data["estado"] = None
     else:
-        # Mostrar sugerencias numeradas
         mensaje = f"🔍 <b>{esc(texto.upper())}</b> - Sugerencias:\n\n"
         sugerencias = opciones[:10]
         context.user_data["sugerencias"] = sugerencias
@@ -453,19 +465,16 @@ async def _listado(update, context, user_id, texto):
     
     lineas_norm = [normalizar_texto(l) for l in lineas]
 
-    # Lógica de 2 catálogos máximo (FIFO)
     cat_count = await coleccion_catalogos.count_documents({"proveedor_id": user_id, "es_admin": False})
     if cat_count >= MAX_CATALOGOS_PROVEEDOR:
         oldest = await coleccion_catalogos.find_one({"proveedor_id": user_id, "es_admin": False}, sort=[("fecha_creacion", 1)])
         if oldest: await coleccion_catalogos.delete_one({"_id": oldest["_id"]})
 
-    # Asegurar que el proveedor existe
     provincia_doc = await coleccion_clientes.find_one({"_id": user_id})
     provincia = provincia_doc.get("provincia", "Santiago de Cuba") if provincia_doc else "Santiago de Cuba"
     
     await coleccion_proveedores.update_one({"_id": user_id}, {"$set": {"nombre": update.effective_user.first_name or "Proveedor", "provincia": provincia, "link_token": user_id}}, upsert=True)
 
-    # Guardar catálogo
     await coleccion_catalogos.insert_one({
         "proveedor_id": user_id,
         "lineas_originales": lineas,
@@ -582,7 +591,6 @@ async def destacar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== SERVIDOR HEALTH CHECK PARA RENDER =====
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Servidor HTTP mínimo para que Render no mate el proceso"""
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
@@ -590,11 +598,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'OK')
 
     def log_message(self, format, *args):
-        pass  # Silenciar logs del health check
-
+        pass
 
 def iniciar_health_check():
-    """Inicia servidor HTTP en el puerto de Render"""
     port = int(os.environ.get('PORT', 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -604,7 +610,7 @@ def iniciar_health_check():
 
 # ===== MAIN =====
 def main():
-    # 1. Iniciar health check PRIMERO (para que Render no haga TimeOut)
+    # 1. Iniciar health check PRIMERO
     iniciar_health_check()
 
     # 2. Crear la aplicación del bot
@@ -619,9 +625,15 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensajes)
     )
 
-    print("🤖 MediCuba Bot (MongoDB + Fuzzy) iniciado...")
+    # 4. Limpiar webhooks y updates pendientes ANTES de arrancar
+    async def pre_start(app):
+        logger.info("🧹 Limpiando webhooks y updates pendientes...")
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Limpieza completada. Iniciando polling...")
 
-    # 4. Ejecutar con drop_pending_updates para evitar conflictos
+    application.post_init = pre_start
+
+    # 5. Ejecutar polling
     application.run_polling(drop_pending_updates=True)
 
 
