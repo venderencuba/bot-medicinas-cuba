@@ -319,6 +319,8 @@ async def _admin_dest(query):
     await query.edit_message_text(mensaje, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin_panel")]]), parse_mode="HTML")
 
 # ===== HANDLER ÚNICO DE MENSAJES =====
+
+
 async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     texto = update.message.text
@@ -331,6 +333,18 @@ async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     estado = context.user_data.get("estado")
 
+    # 🧠 INTELIGENCIA: Si escribe texto suelto, asumir que busca una medicina
+    if estado is None:
+        # Verificar si tiene provincia
+        cliente = await coleccion_clientes.find_one({"_id": user_id})
+        if cliente and cliente.get("provincia"):
+            # Automáticamente iniciar búsqueda
+            estado = "esperando_medicina"
+            context.user_data["estado"] = estado
+        else:
+            await update.message.reply_text("⚠️ Primero debes seleccionar tu provincia con /start")
+            return
+
     try:
         if estado == "esperando_medicina": await _busqueda(update, context, user_id, texto)
         elif estado == "esperando_listado": await _listado(update, context, user_id, texto)
@@ -339,13 +353,14 @@ async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif estado == "esperando_telegram": await _telegram_user(update, context, user_id, texto)
         elif estado == "admin_esperando_listado": await _admin_listado(update, context, user_id, texto)
         elif estado == "esperando_seleccion": await _seleccion_sugerencia(update, context, user_id, texto)
-        else:
-            await update.message.reply_text("No entendí. Usa los botones del menú.")
     except Exception as e:
         logger.error(f"❌ Error procesando mensaje: {e}")
-        context.user_data["estado"] = None # DESATASCAR
+        context.user_data["estado"] = None
         await update.message.reply_text(f"⚠️ Ocurrió un error interno: {esc(str(e)[:200])}\n\nVolviendo al menú...", reply_markup=ReplyKeyboardRemove())
         await enviar_menu_mensaje(update, user_id)
+
+
+
 
 async def _cambio_provincia(update, context, user_id, texto):
     try:
