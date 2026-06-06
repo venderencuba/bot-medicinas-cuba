@@ -1,6 +1,6 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v2.8.0 | Fuzzy Matching | Carrusel Anuncios | Admin Enumerados | Conteo Provincias
+v2.8.1 | Fuzzy Matching | Carrusel Anuncios | Admin Enumerados | Config en BD
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -25,7 +25,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v2.8.0"
+VERSION = "v2.8.1"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -54,25 +54,29 @@ db = client.medicubadb
 coleccion_clientes = db.clientes
 coleccion_proveedores = db.proveedores
 coleccion_catalogos = db.catalogos
+coleccion_config = db.config
 
 PROVINCIAS = ["Pinar del Río", "Artemisa", "La Habana", "Mayabeque", "Matanzas", "Cienfuegos", "Villa Clara", "Sancti Spíritus", "Ciego de Ávila", "Camagüey", "Las Tunas", "Granma", "Holguín", "Santiago de Cuba", "Guantánamo", "Isla de la Juventud"]
 
-# ===== CONFIG LOCAL =====
-ARCHIVO_CONFIG = "config_bot.json"
-def cargar_config():
-    d = {"administradores": [ADMIN_ID], "anuncios": [], "siguiente_num_admin": 1}
-    if os.path.exists(ARCHIVO_CONFIG):
-        try:
-            with open(ARCHIVO_CONFIG, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                for k in d:
-                    if k not in data: data[k] = d[k]
-                return data
-        except: pass
-    return d
-def guardar_config(c):
-    with open(ARCHIVO_CONFIG, 'w', encoding='utf-8') as f: json.dump(c, f, ensure_ascii=False, indent=2)
-datos = cargar_config()
+# ===== CONFIG EN BD =====
+datos = {}
+
+async def init_config():
+    global datos
+    doc = await coleccion_config.find_one({"_id": "main_config"})
+    if not doc:
+        doc = {"_id": "main_config", "administradores": [ADMIN_ID], "anuncios": [], "siguiente_num_admin": 1}
+        await coleccion_config.insert_one(doc)
+    defaults = {"administradores": [ADMIN_ID], "anuncios": [], "siguiente_num_admin": 1}
+    for k, v in defaults.items():
+        if k not in doc: doc[k] = v
+    datos = doc
+
+async def guardar_config(c):
+    global datos
+    datos = c
+    save_data = {k: v for k, v in c.items() if k != "_id"}
+    await coleccion_config.update_one({"_id": "main_config"}, {"$set": save_data}, upsert=True)
 
 # ===== AUXILIARES =====
 def esc(t):
@@ -404,7 +408,7 @@ async def _admin_add_id_msg(update, context, uid, txt):
         na = int(txt.strip())
         if na not in datos.get("administradores", [ADMIN_ID]):
             datos.setdefault("administradores", [ADMIN_ID]).append(na)
-            guardar_config(datos)
+            await guardar_config(datos)
             await update.message.reply_text(f"✅ Admin {na} añadido.", reply_markup=ReplyKeyboardRemove())
         else:
             await update.message.reply_text("Ese ID ya es administrador.", reply_markup=ReplyKeyboardRemove())
@@ -593,7 +597,7 @@ async def _admin_list(update, context, uid, txt):
     await coleccion_catalogos.insert_one({"proveedor_id": apid, "lineas_originales": lns, "lineas_normalizadas": lns_n, "es_admin": True, "fecha_creacion": datetime.now(), "fecha_expiracion": exp, "provincia": "Santiago de Cuba", "hash": h})
     
     datos["siguiente_num_admin"] = num_admin + 1
-    guardar_config(datos)
+    await guardar_config(datos)
     
     await update.message.reply_text(f"✅ {len(lns)} líneas.\n📞 {esc(tel)}\n📛 Publicado como: {esc(nombre_admin)}", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
     await enviar_menu_msg(update, uid); context.user_data["estado"] = None; context.user_data["admin_tel"] = None
@@ -613,7 +617,7 @@ async def add_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await update.message.reply_text("<code>/addadmin ID</code>", parse_mode="HTML")
     try: na = int(context.args[0])
     except: return await update.message.reply_text("ID numérico.")
-    if na not in datos.get("administradores", [ADMIN_ID]): datos.setdefault("administradores", [ADMIN_ID]).append(na); guardar_config(datos); await update.message.reply_text(f"✅ Admin {na}")
+    if na not in datos.get("administradores", [ADMIN_ID]): datos.setdefault("administradores", [ADMIN_ID]).append(na); await guardar_config(datos); await update.message.reply_text(f"✅ Admin {na}")
     else: await update.message.reply_text("Ya lo es.")
 
 async def del_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -622,16 +626,16 @@ async def del_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try: da = int(context.args[0])
     except: return await update.message.reply_text("ID numérico.")
     if da == ADMIN_ID: return await update.message.reply_text("No puedes eliminarte.")
-    if da in datos.get("administradores", []): datos["administradores"].remove(da); guardar_config(datos); await update.message.reply_text(f"✅ Eliminado {da}")
+    if da in datos.get("administradores", []): datos["administradores"].remove(da); await guardar_config(datos); await update.message.reply_text(f"✅ Eliminado {da}")
 
 async def anuncio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not es_admin(update.effective_user.id): return
     if not context.args or len(context.args) < 2: return await update.message.reply_text("<code>/anuncio add texto</code>\n<code>/anuncio del N</code>", parse_mode="HTML")
     a = context.args[0].lower(); t = " ".join(context.args[1:])
     datos.setdefault("anuncios", [])
-    if a == "add": datos["anuncios"].append(t); guardar_config(datos); await update.message.reply_text("✅ Añadido.")
+    if a == "add": datos["anuncios"].append(t); await guardar_config(datos); await update.message.reply_text("✅ Añadido.")
     elif a == "del":
-        try: datos["anuncios"].pop(int(t) - 1); guardar_config(datos); await update.message.reply_text("✅ Eliminado.")
+        try: datos["anuncios"].pop(int(t) - 1); await guardar_config(datos); await update.message.reply_text("✅ Eliminado.")
         except: await update.message.reply_text("N inválido.")
 
 # ===== HEALTH CHECK =====
@@ -647,6 +651,7 @@ def iniciar_hc():
 
 # ===== MAIN =====
 async def post_init(app):
+    await init_config()
     try: await app.bot.delete_webhook(drop_pending_updates=True)
     except: pass
     try:
