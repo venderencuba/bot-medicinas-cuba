@@ -1,6 +1,6 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v2.8.1 | Fuzzy Matching | Carrusel Anuncios | Admin Enumerados | Config en BD
+v2.8.1 | Fuzzy Matching | Carrusel Anuncios | Admin Enumerados | Config en BD | Marketing
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -124,7 +124,7 @@ def menu_principal(uid, prov, anuncio_idx=0):
     tk_anuncio = []
     
     if a_list:
-        msg_anuncio = f"📢 {a_list[anuncio_idx]}\n\n"
+        msg_anuncio = f"\n\n📢 {a_list[anuncio_idx]}"
         if len(a_list) > 1:
             prev_idx = (anuncio_idx - 1) % len(a_list)
             next_idx = (anuncio_idx + 1) % len(a_list)
@@ -150,7 +150,7 @@ def menu_principal(uid, prov, anuncio_idx=0):
     link_str = "t.me/MediCubaBot"
     padded_link = link_str + " " * max(1, 28 - len(link_str)) + ver
     
-    t = f"{msg_anuncio}🏥 <b>MediCuba</b>\n🩺 Tu salud, nuestra prioridad\n\n📍 <b>Provincia:</b> {esc(prov)}\n\n<code>{padded_link}</code>"
+    t = f"🏥 <b>MediCuba</b>\n🩺 Tu salud, nuestra prioridad\n\n📍 <b>Provincia:</b> {esc(prov)}\n\n<code>{padded_link}</code>{msg_anuncio}"
     return t, InlineKeyboardMarkup(final_tk)
 
 def menu_post_busqueda():
@@ -172,11 +172,23 @@ async def enviar_menu_msg(upd, uid, anuncio_idx=0):
 # ===== COMANDOS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
+    user = update.effective_user
     try:
+        # Guardar/Actualizar datos del cliente para marketing
+        await coleccion_clientes.update_one(
+            {"_id": uid}, 
+            {"$set": {
+                "nombre": user.first_name, 
+                "username": user.username, 
+                "ultima_actividad": datetime.now()
+            }, "$setOnInsert": {"provincia": None, "busquedas": 0, "fecha_registro": datetime.now()}}, 
+            upsert=True
+        )
+
         if context.args and context.args[0].startswith("proveedor_"):
             pid = context.args[0].replace("proveedor_", "")
             await mostrar_cat_prov(update, pid); return
-        await coleccion_clientes.update_one({"_id": uid}, {"$setOnInsert": {"provincia": None, "busquedas": 0}}, upsert=True)
+        
         c = await coleccion_clientes.find_one({"_id": uid})
         if not c.get("provincia"): return await forzar_prov(update, context)
         await enviar_menu_msg(update, uid)
@@ -425,7 +437,10 @@ async def _busqueda(update, context, uid, txt):
     if not prov:
         await update.message.reply_text("❌ Configura provincia.", reply_markup=ReplyKeyboardRemove())
         return await enviar_menu_msg(update, uid)
-    await coleccion_clientes.update_one({"_id": uid}, {"$inc": {"busquedas": 1}})
+    
+    # Actualizar actividad de marketing
+    await coleccion_clientes.update_one({"_id": uid}, {"$inc": {"busquedas": 1}, "$set": {"ultima_actividad": datetime.now()}})
+    
     await limpiar_expirados()
     try: cats = await coleccion_catalogos.find({"provincia": prov}).to_list(None)
     except: return await update.message.reply_text("⚠️ Error BD.", reply_markup=menu_post_busqueda())
@@ -588,6 +603,7 @@ async def _admin_list(update, context, uid, txt):
     lns = [l.strip() for l in txt.split('\n') if l.strip()][:MAX_LINEAS_CATALOGO]
     lns_n = [normalizar_texto(l) for l in lns]
     
+    # Lógica de enumeración de Admin
     num_admin = datos.get("siguiente_num_admin", 1)
     nombre_admin = f"{num_admin} Admin MediCuba"
     
@@ -596,6 +612,7 @@ async def _admin_list(update, context, uid, txt):
     exp = datetime.now() + timedelta(days=DIAS_EXPIRACION_ADMIN)
     await coleccion_catalogos.insert_one({"proveedor_id": apid, "lineas_originales": lns, "lineas_normalizadas": lns_n, "es_admin": True, "fecha_creacion": datetime.now(), "fecha_expiracion": exp, "provincia": "Santiago de Cuba", "hash": h})
     
+    # Actualizar el contador en la BD
     datos["siguiente_num_admin"] = num_admin + 1
     await guardar_config(datos)
     
@@ -651,7 +668,7 @@ def iniciar_hc():
 
 # ===== MAIN =====
 async def post_init(app):
-    await init_config()
+    await init_config() # Cargar configuración desde MongoDB al arrancar
     try: await app.bot.delete_webhook(drop_pending_updates=True)
     except: pass
     try:
