@@ -26,8 +26,7 @@ from rapidfuzz import fuzz as rfuzz
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("BOT_TOKEN", "8685939368:AAESfgUVeQG0qA8521Qx5LO_7Qm3LY27Qq0")
-ADMIN_ID = 814338625
+TOKEN = os.environ.get("BOT_TOKEN", "")
 
 # Constantes del Bot
 MAX_LINEAS_CATALOGO = 80
