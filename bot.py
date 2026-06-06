@@ -32,7 +32,6 @@ ADMIN_ID = 814338625
 if not TOKEN:
     logger.error("❌ FATAL: La variable de entorno BOT_TOKEN no está configurada.")
 
-# Constantes del Bot
 MAX_LINEAS_CATALOGO = 80
 MAX_CATALOGOS_PROVEEDOR = 2
 DIAS_EXPIRACION_ADMIN = 10
@@ -68,7 +67,8 @@ def normalizar_texto(texto):
     texto = texto.lower()
     acentos = {'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u', 'ü': 'u'}
     for a, b in acentos.items(): texto = texto.replace(a, b)
-    texto = re.sub(r'[^\w\s]', '', texto)
+    texto = re.sub(r'[^\w\s]', ' ', texto)  # Reemplazar símbolos por espacio (no eliminar)
+    texto = re.sub(r'\s+', ' ', texto)  # Eliminar espacios múltiples
     return texto.strip()
 
 def es_admin(user_id):
@@ -80,9 +80,15 @@ async def es_destacado_activo(proveedor):
     except: return False
 
 def contiene_productos_no_medicos(texto):
+    """CORREGIDO: Busca palabras completas, no subcadenas.
+    Así 'ropa' NO coincide dentro de 'propanolol'."""
     texto_norm = normalizar_texto(texto)
     for palabra in BLACKLIST:
-        if palabra in texto_norm: return True
+        # \b = límite de palabra. Solo coincide palabras completas.
+        patron = r'\b' + re.escape(palabra) + r'\b'
+        if re.search(patron, texto_norm):
+            logger.info(f"🚫 Palabra no médica detectada: '{palabra}' en texto normalizado")
+            return True
     return False
 
 def generar_hash(texto):
@@ -130,13 +136,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prov_id = context.args[0].replace("proveedor_", "")
             await mostrar_catalogo_proveedor_msg(update, prov_id)
             return
-
         await coleccion_clientes.update_one({"_id": user_id}, {"$setOnInsert": {"provincia": None, "busquedas": 0}}, upsert=True)
         cliente = await coleccion_clientes.find_one({"_id": user_id})
-        
         if not cliente.get("provincia"):
             return await forzar_provincia(update, context)
-
         await enviar_menu_mensaje(update, user_id)
     except Exception as e:
         logger.error(f"❌ Error en /start: {e}")
@@ -157,20 +160,16 @@ async def forzar_provincia(update, context):
 async def mostrar_catalogo_proveedor_msg(update, proveedor_id):
     proveedor = await coleccion_proveedores.find_one({"_id": proveedor_id})
     if not proveedor: return await update.message.reply_text("❌ Proveedor no encontrado.")
-    
     catalogos = await coleccion_catalogos.find({"proveedor_id": proveedor_id, "es_admin": False}).to_list(None)
     if not catalogos: return await update.message.reply_text("📭 Este proveedor no tiene catálogos activos.")
-
     mensaje = f"🏥 <b>{esc(proveedor.get('nombre'))}</b>\n"
     if await es_destacado_activo(proveedor): mensaje += "⭐ <b>Proveedor Destacado</b> ⭐\n"
     mensaje += f"📞 {esc(proveedor.get('contacto_mostrar', 'No especificado'))}\n" + "─"*20 + "\n\n"
-    
     for idx, cat in enumerate(catalogos, 1):
         mensaje += f"<b>📋 Catálogo {idx}:</b>\n"
         for linea in cat["lineas_originales"][:30]: mensaje += f"• {esc(linea)}\n"
         if len(cat["lineas_originales"]) > 30: mensaje += f"... y {len(cat['lineas_originales'])-30} más.\n"
         mensaje += "\n"
-
     mensaje += "─"*20 + "\n🩺 <b>MediCuba</b>"
     teclado = [[InlineKeyboardButton("🏠 Ir al Bot", callback_data="volver")]]
     await update.message.reply_text(mensaje, reply_markup=InlineKeyboardMarkup(teclado), parse_mode="HTML")
@@ -181,11 +180,9 @@ async def manejador_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     user_id = str(query.from_user.id)
     data = query.data
-
     teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
 
-    if data == "volver": 
-        await enviar_menu_callback(query, user_id)      
+    if data == "volver": await enviar_menu_callback(query, user_id)      
     elif data == "buscar":
         cliente = await coleccion_clientes.find_one({"_id": user_id})
         if not cliente or not cliente.get("provincia"):
@@ -322,7 +319,6 @@ async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     texto = update.message.text
 
-    # SISTEMA GLOBAL DE CANCELACIÓN / VOLVER
     if texto in ["🔙 Volver al Menú", "❌ Cancelar", "/cancelar", "/cancel"]:
         context.user_data["estado"] = None
         await update.message.reply_text("↩️ Operación cancelada.", reply_markup=ReplyKeyboardRemove())
@@ -330,7 +326,6 @@ async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     estado = context.user_data.get("estado")
 
-    # 🧠 INTELIGENCIA: Si escribe texto suelto, asumir que busca una medicina
     if estado is None:
         cliente = await coleccion_clientes.find_one({"_id": user_id})
         if cliente and cliente.get("provincia"):
@@ -376,41 +371,32 @@ async def _busqueda(update, context, user_id, texto):
     medicina_buscar = normalizar_texto(texto)
     cliente = await coleccion_clientes.find_one({"_id": user_id})
     provincia = cliente.get("provincia") if cliente else None
-
     if not provincia: 
         await update.message.reply_text("❌ Configura tu provincia primero.", reply_markup=ReplyKeyboardRemove())
         return await enviar_menu_mensaje(update, user_id)
-
     await coleccion_clientes.update_one({"_id": user_id}, {"$inc": {"busquedas": 1}})
     await limpiar_expirados()
-
     catalogos_prov = await coleccion_catalogos.find({"provincia": provincia}).to_list(None)
-    
     opciones = []
     for cat in catalogos_prov:
         prov_id = cat["proveedor_id"]
         proveedor = await coleccion_proveedores.find_one({"_id": prov_id})
         if not proveedor: continue
-        
         for i, linea_norm in enumerate(cat["lineas_normalizadas"]):
             score = rfuzz.WRatio(medicina_buscar, linea_norm)
             if score >= UMBRAL_FUZZY:
                 opciones.append({"score": score, "linea_original": cat["lineas_originales"][i], "proveedor": proveedor})
-
     if not opciones:
         teclado = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")], [InlineKeyboardButton("🏠 Menú", callback_data="volver")]])
         await update.message.reply_text(f"❌ No encontré '{esc(texto)}' en {esc(provincia)}.\n\n💡 Revisa ortografía o prueba otro nombre.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
         await update.message.reply_text("¿Qué deseas hacer?", reply_markup=teclado)
         context.user_data["estado"] = None
         return
-
     opciones.sort(key=lambda x: x["score"], reverse=True)
-
     if len(opciones) <= 5:
         mensaje = f"🔍 <b>{esc(texto.upper())}</b> en {esc(provincia)}\n\n✅ Encontré {len(opciones)} coincidencia(s):\n\n"
         enlace_wa = None
         prov_ya_mostrados = set()
-        
         for op in opciones:
             p = op["proveedor"]
             dest = "⭐ " if await es_destacado_activo(p) else ""
@@ -420,15 +406,12 @@ async def _busqueda(update, context, user_id, texto):
                 contacto = p.get("contacto", {})
                 if contacto.get("tipo") in ["whatsapp", "ambos"] and not enlace_wa:
                     tel = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
-                    # MENSAJE MEJORADO CON LINK DEL BOT
                     if tel: enlace_wa = f"https://wa.me/{tel}?text=Hola%2C%20te%20contacto%20desde%20MediCuba%20(https%3A%2F%2Ft.me%2FMediCubaBot).%20Tienes%20disponible%20{texto}%3F"
             mensaje += f"   • {esc(op['linea_original'])}\n"
-        
         botones = []
         if enlace_wa: botones.append([InlineKeyboardButton("📞 Contactar WhatsApp", url=enlace_wa)])
         botones.append([InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")])
         botones.append([InlineKeyboardButton("🏠 Menú", callback_data="volver")])
-        
         await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
         await update.message.reply_text("¿Qué deseas hacer?", reply_markup=InlineKeyboardMarkup(botones))
         context.user_data["estado"] = None
@@ -456,7 +439,6 @@ async def _seleccion_sugerencia(update, context, user_id, texto):
             contacto = p.get("contacto", {})
             if contacto.get("tipo") in ["whatsapp", "ambos"]:
                 tel = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
-                # MENSAJE MEJORADO CON LINK DEL BOT
                 if tel: enlace_wa = f"https://wa.me/{tel}?text=Hola%2C%20te%20contacto%20desde%20MediCuba%20(https%3A%2F%2Ft.me%2FMediCubaBot).%20Tienes%20disponible%20esto%3F"
             botones = [[InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")], [InlineKeyboardButton("🏠 Menú", callback_data="volver")]]
             if enlace_wa: botones.insert(0, [InlineKeyboardButton("📞 Contactar WhatsApp", url=enlace_wa)])
@@ -472,34 +454,26 @@ async def _listado(update, context, user_id, texto):
         context.user_data["estado"] = None 
         await update.message.reply_text("❌ <b>Listado rechazado.</b>\n\nSe detectaron productos no médicos (ropa, comida, etc). Solo medicinas.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
         return await enviar_menu_mensaje(update, user_id)
-
     lineas = [l.strip() for l in texto.split('\n') if l.strip()]
     truncado = len(lineas) > MAX_LINEAS_CATALOGO
     lineas = lineas[:MAX_LINEAS_CATALOGO]
     lineas_norm = [normalizar_texto(l) for l in lineas]
-
     cat_count = await coleccion_catalogos.count_documents({"proveedor_id": user_id, "es_admin": False})
     if cat_count >= MAX_CATALOGOS_PROVEEDOR:
         oldest = await coleccion_catalogos.find_one({"proveedor_id": user_id, "es_admin": False}, sort=[("fecha_creacion", 1)])
         if oldest: await coleccion_catalogos.delete_one({"_id": oldest["_id"]})
-
     provincia_doc = await coleccion_clientes.find_one({"_id": user_id})
     provincia = provincia_doc.get("provincia", "Santiago de Cuba") if provincia_doc else "Santiago de Cuba"
-    
     await coleccion_proveedores.update_one({"_id": user_id}, {"$set": {"nombre": update.effective_user.first_name or "Proveedor", "provincia": provincia, "link_token": user_id}}, upsert=True)
-
     await coleccion_catalogos.insert_one({
         "proveedor_id": user_id, "lineas_originales": lineas, "lineas_normalizadas": lineas_norm,
         "es_admin": False, "fecha_creacion": datetime.now(), "fecha_expiracion": None,
         "provincia": provincia, "hash": generar_hash(texto)
     })
-
     aviso = ""
     if truncado: aviso = f"\n⚠️ Solo se guardaron las primeras {MAX_LINEAS_CATALOGO} líneas."
-    
     context.user_data["estado"] = "esperando_contacto"
     context.user_data["medicinas_count"] = len(lineas)
-    
     teclado = [[InlineKeyboardButton("📱 WhatsApp", callback_data="contacto_whatsapp")], [InlineKeyboardButton("✈️ Telegram", callback_data="contacto_telegram")], [InlineKeyboardButton("📞 Ambos", callback_data="contacto_ambos")]]
     await update.message.reply_text(f"✅ Se extrajeron <b>{len(lineas)}</b> líneas.{aviso}\n\nAhora elige cómo te contactarán:", reply_markup=InlineKeyboardMarkup(teclado), parse_mode="HTML")
 
@@ -561,33 +535,26 @@ async def _admin_listado(update, context, user_id, texto):
         context.user_data["estado"] = None 
         await update.message.reply_text("❌ Error. Falta el teléfono. Intenta de nuevo desde el panel.", reply_markup=ReplyKeyboardRemove())
         return await enviar_menu_mensaje(update, user_id)
-
     hash_txt = generar_hash(texto)
     if await coleccion_catalogos.find_one({"hash": hash_txt}):
         context.user_data["estado"] = None 
         await update.message.reply_text("⚠️ <b>Duplicado.</b> Este listado exacto ya existe.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
         return await enviar_menu_mensaje(update, user_id)
-
     if contiene_productos_no_medicos(texto):
         context.user_data["estado"] = None 
         await update.message.reply_text("❌ Listado contiene productos no médicos.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
         return await enviar_menu_mensaje(update, user_id)
-
     lineas = [l.strip() for l in texto.split('\n') if l.strip()][:MAX_LINEAS_CATALOGO]
     lineas_norm = [normalizar_texto(l) for l in lineas]
-    
     admin_prov_id = f"admin_{user_id}_{int(datetime.now().timestamp())}"
     provincia = "Santiago de Cuba"
-
     await coleccion_proveedores.update_one({"_id": admin_prov_id}, {"$set": {"nombre": "Admin MediCuba", "contacto": {"tipo": "whatsapp", "whatsapp": telefono}, "contacto_mostrar": telefono, "provincia": provincia}}, upsert=True)
-    
     expiracion = datetime.now() + timedelta(days=DIAS_EXPIRACION_ADMIN)
     await coleccion_catalogos.insert_one({
         "proveedor_id": admin_prov_id, "lineas_originales": lineas, "lineas_normalizadas": lineas_norm,
         "es_admin": True, "fecha_creacion": datetime.now(), "fecha_expiracion": expiracion,
         "provincia": provincia, "hash": hash_txt
     })
-
     await update.message.reply_text(f"✅ <b>Listado Admin cargado</b>\n\n📊 {len(lineas)} líneas.\n📞 {esc(telefono)}\n⏳ Expira: {expiracion.strftime('%Y-%m-%d')}", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
     await enviar_menu_mensaje(update, user_id)
     context.user_data["estado"] = None
@@ -634,11 +601,8 @@ def main():
     if not TOKEN or not MONGODB_URI:
         logger.error("🛑 BOT DETENIDO: Faltan variables de entorno (BOT_TOKEN o MONGODB_URI).")
         return
-
     iniciar_health_check()
-
     application = Application.builder().token(TOKEN).post_init(post_init).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancelar", cancelar))
     application.add_handler(CommandHandler("cancel", cancelar))
@@ -646,7 +610,6 @@ def main():
     application.add_handler(CommandHandler("destacar", destacar_cmd))
     application.add_handler(CallbackQueryHandler(manejador_callbacks))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensajes))
-
     logger.info("🤖 MediCuba Bot (MongoDB + Fuzzy) iniciado...")
     application.run_polling(drop_pending_updates=True)
 
