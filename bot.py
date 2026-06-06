@@ -30,7 +30,7 @@ TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 814338625
 
 if not TOKEN:
-    logger.error("❌ FATAL: La variable de entorno BOT_TOKEN no está configurada en Render.")
+    logger.error("❌ FATAL: La variable de entorno BOT_TOKEN no está configurada.")
 
 # Constantes del Bot
 MAX_LINEAS_CATALOGO = 80
@@ -38,13 +38,12 @@ MAX_CATALOGOS_PROVEEDOR = 2
 DIAS_EXPIRACION_ADMIN = 10
 UMBRAL_FUZZY = 70
 
-# Blacklist de productos no médicos
 BLACKLIST = ["zapatos", "ropa", "joyas", "comida", "pollo", "arroz", "telefono", "casa", "carro", "zapatillas", "frutas", "viveres"]
 
 # ===== CONEXIÓN A MONGODB =====
 MONGODB_URI = os.environ.get("MONGODB_URI")
 if not MONGODB_URI:
-    logger.error("❌ FATAL: La variable de entorno MONGODB_URI no está configurada en Render.")
+    logger.error("❌ FATAL: La variable de entorno MONGODB_URI no está configurada.")
 
 client = AsyncIOMotorClient(MONGODB_URI)
 db = client.medicubadb
@@ -69,7 +68,6 @@ def normalizar_texto(texto):
     texto = texto.lower()
     acentos = {'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u', 'ü': 'u'}
     for a, b in acentos.items(): texto = texto.replace(a, b)
-    # Eliminar emojis, símbolos y puntuación para que la búsqueda sea perfecta
     texto = re.sub(r'[^\w\s]', '', texto)
     return texto.strip()
 
@@ -122,7 +120,6 @@ async def enviar_menu_mensaje(update, user_id):
     provincia_doc = await coleccion_clientes.find_one({"_id": user_id})
     provincia = provincia_doc.get("provincia", "No seleccionada") if provincia_doc else "No seleccionada"
     texto, teclado = generar_menu_principal(user_id, provincia)
-    # Remover teclado de texto si existe al volver al menú
     await update.message.reply_text(texto, reply_markup=teclado, parse_mode="HTML")
 
 # ===== COMANDOS BÁSICOS =====
@@ -146,7 +143,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Error al conectar con la base de datos.")
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando para desbloquear el bot si está esperando un texto"""
     context.user_data["estado"] = None
     user_id = str(update.effective_user.id)
     await update.message.reply_text("↩️ Operación cancelada.", reply_markup=ReplyKeyboardRemove())
@@ -156,7 +152,7 @@ async def forzar_provincia(update, context):
     context.user_data["estado"] = "cambiando_provincia"
     lista = "\n".join([f"{i+1}. {p}" for i, p in enumerate(PROVINCIAS)])
     teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
-    await update.message.reply_text(f"👋 ¡Bienvenido a MediCuba!\n\n📍 Primero debes seleccionar tu provincia:\n\n{lista}\n\nResponde con el NÚMERO:", reply_markup=teclado_volver, parse_mode="HTML")
+    await update.message.reply_text(f"👋 ¡Bienvenido a MediCuba!\n\n📍 Primero debes seleccionar tu provincia:\n\n{lista}\n\nResponde con el NÚMERO:", reply_markup=teclado_volver)
 
 async def mostrar_catalogo_proveedor_msg(update, proveedor_id):
     proveedor = await coleccion_proveedores.find_one({"_id": proveedor_id})
@@ -196,7 +192,6 @@ async def manejador_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE
             return await query.edit_message_text("❌ Primero configura tu provincia.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📍 Configurar", callback_data="cambiar_provincia")]]))
         context.user_data["estado"] = "esperando_medicina"
         await query.edit_message_text("🔍 <b>Buscar Medicina</b>\n\nEscribe el nombre (acepta errores ortográficos):\n\n<i>Ej:</i> <code>parasetamol</code>", parse_mode="HTML")
-        # Enviar teclado de volver por separado
         await context.bot.send_message(chat_id=user_id, text="⬇️ Escribe la medicina o presiona Volver:", reply_markup=teclado_volver)  
     elif data == "publicar":
         context.user_data["estado"] = "esperando_listado"
@@ -220,7 +215,7 @@ async def manejador_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data == "admin_panel":
         if es_admin(user_id): await _admin_panel(query)     
     elif data.startswith("admin_"): 
-        if es_admin(user_id): await _admin_acciones(query, data)
+        if es_admin(user_id): await _admin_acciones(query, context, user_id, data)
 
 # ===== FUNCIONES DE VISTAS =====
 async def _mostrar_perfil(query, user_id):
@@ -289,8 +284,11 @@ async def _admin_panel(query):
     teclado = [[InlineKeyboardButton("📥 Cargar Listado", callback_data="admin_cargar")], [InlineKeyboardButton("📊 Estadísticas", callback_data="admin_stats")], [InlineKeyboardButton("👥 Proveedores", callback_data="admin_provs")], [InlineKeyboardButton("⭐ Destacar", callback_data="admin_dest")], [InlineKeyboardButton("🏠 Volver", callback_data="volver")]]
     await query.edit_message_text("🔧 <b>Panel Admin</b>", reply_markup=InlineKeyboardMarkup(teclado), parse_mode="HTML")
 
-async def _admin_acciones(query, data):
-    if data == "admin_cargar": await query.edit_message_text("📥 Usa: <code>/admin_cargar_listado +5351234567</code>", parse_mode="HTML")
+async def _admin_acciones(query, context, user_id, data):
+    if data == "admin_cargar":
+        context.user_data["estado"] = "admin_esperando_telefono_listado"
+        await query.edit_message_text("📥 <b>Cargar Listado Admin</b>\n\nEnvía el número de teléfono de WhatsApp para este listado (ej: <code>+5351234567</code>):", parse_mode="HTML")
+        await context.bot.send_message(chat_id=user_id, text="⬇️ Escribe el número o presiona Volver:", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True))
     elif data == "admin_stats": await _admin_stats(query)
     elif data == "admin_provs": await _admin_provs(query)
     elif data == "admin_dest": await _admin_dest(query)
@@ -319,8 +317,6 @@ async def _admin_dest(query):
     await query.edit_message_text(mensaje, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin_panel")]]), parse_mode="HTML")
 
 # ===== HANDLER ÚNICO DE MENSAJES =====
-
-
 async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     texto = update.message.text
@@ -335,10 +331,8 @@ async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🧠 INTELIGENCIA: Si escribe texto suelto, asumir que busca una medicina
     if estado is None:
-        # Verificar si tiene provincia
         cliente = await coleccion_clientes.find_one({"_id": user_id})
         if cliente and cliente.get("provincia"):
-            # Automáticamente iniciar búsqueda
             estado = "esperando_medicina"
             context.user_data["estado"] = estado
         else:
@@ -351,16 +345,19 @@ async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif estado == "cambiando_provincia": await _cambio_provincia(update, context, user_id, texto)
         elif estado == "esperando_telefono": await _telefono(update, context, user_id, texto)
         elif estado == "esperando_telegram": await _telegram_user(update, context, user_id, texto)
+        elif estado == "admin_esperando_telefono_listado": await _admin_esperando_telefono(update, context, user_id, texto)
         elif estado == "admin_esperando_listado": await _admin_listado(update, context, user_id, texto)
         elif estado == "esperando_seleccion": await _seleccion_sugerencia(update, context, user_id, texto)
+        else:
+            # Si llega aquí, está en un estado no manejado (ej: esperando_contacto). Resetear.
+            context.user_data["estado"] = None
+            await update.message.reply_text("⚠️ Acción no reconocida. Volviendo al menú.", reply_markup=ReplyKeyboardRemove())
+            await enviar_menu_mensaje(update, user_id)
     except Exception as e:
         logger.error(f"❌ Error procesando mensaje: {e}")
         context.user_data["estado"] = None
         await update.message.reply_text(f"⚠️ Ocurrió un error interno: {esc(str(e)[:200])}\n\nVolviendo al menú...", reply_markup=ReplyKeyboardRemove())
         await enviar_menu_mensaje(update, user_id)
-
-
-
 
 async def _cambio_provincia(update, context, user_id, texto):
     try:
@@ -402,7 +399,7 @@ async def _busqueda(update, context, user_id, texto):
 
     if not opciones:
         teclado = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")], [InlineKeyboardButton("🏠 Menú", callback_data="volver")]])
-        await update.message.reply_text(f"❌ No encontré '{esc(texto)}' en {esc(provincia)}.\n\n💡 Revisa ortografía o prueba otro nombre.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(f"❌ No encontré '{esc(texto)}' en {esc(provincia)}.\n\n💡 Revisa ortografía o prueba otro nombre.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
         await update.message.reply_text("¿Qué deseas hacer?", reply_markup=teclado)
         context.user_data["estado"] = None
         return
@@ -546,14 +543,21 @@ async def admin_cargar_listado(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["admin_telefono"] = context.args[0]
     context.user_data["estado"] = "admin_esperando_listado"
     teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"], ["❌ Cancelar"]], resize_keyboard=True)
-    await update.message.reply_text("📥 Pega el listado de admin:", reply_markup=teclado_volver, parse_mode="HTML")
+    await update.message.reply_text("📥 Teléfono guardado. Ahora pega el listado de admin:", reply_markup=teclado_volver, parse_mode="HTML")
+
+async def _admin_esperando_telefono(update, context, user_id, texto):
+    telefono = texto.strip()
+    context.user_data["admin_telefono"] = telefono
+    context.user_data["estado"] = "admin_esperando_listado"
+    teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"], ["❌ Cancelar"]], resize_keyboard=True)
+    await update.message.reply_text(f"✅ Teléfono registrado: <code>{esc(telefono)}</code>\n\nAhora pega el listado de medicinas:", reply_markup=teclado_volver, parse_mode="HTML")
 
 async def _admin_listado(update, context, user_id, texto):
     if not es_admin(user_id): return
     telefono = context.user_data.get("admin_telefono")
     if not telefono: 
         context.user_data["estado"] = None 
-        await update.message.reply_text("❌ Error. Usa /admin_cargar_listado primero.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("❌ Error. Falta el teléfono. Intenta de nuevo desde el panel.", reply_markup=ReplyKeyboardRemove())
         return await enviar_menu_mensaje(update, user_id)
 
     hash_txt = generar_hash(texto)
