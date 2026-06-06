@@ -1,6 +1,6 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v2.5.0 | Fuzzy Matching | 2 Catálogos | Carrusel Anuncios | Sub-Admins
+v2.5.1 | Fuzzy Matching | 2 Catálogos | Carrusel Anuncios | Sub-Admins
 Optimizado para conexiones lentas (Cuba)
 """
 
@@ -23,14 +23,13 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v2.5.0"
+VERSION = "v2.5.1"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 814338625
-# Cambia esto por tu usuario de Telegram (sin @) para que te contacten
-ADMIN_USERNAME = "TuUsuarioAqui" 
+ADMIN_USERNAME = "TuUsuarioAqui"  # Cambia por tu usuario (sin @)
 
 if not TOKEN:
     logger.error("❌ FATAL: La variable de entorno BOT_TOKEN no está configurada.")
@@ -42,6 +41,7 @@ UMBRAL_FUZZY = 70
 
 BLACKLIST = ["zapatos", "ropa", "joyas", "comida", "pollo", "arroz", "telefono", "casa", "carro", "zapatillas", "frutas", "viveres"]
 
+# ===== CONEXIÓN A MONGODB =====
 MONGODB_URI = os.environ.get("MONGODB_URI")
 if not MONGODB_URI:
     logger.error("❌ FATAL: La variable de entorno MONGODB_URI no está configurada.")
@@ -59,6 +59,35 @@ PROVINCIAS = [
     "Camagüey", "Las Tunas", "Granma", "Holguín", "Santiago de Cuba",
     "Guantánamo", "Isla de la Juventud"
 ]
+
+# ===== CONFIGURACIÓN LOCAL (Admins y Anuncios) =====
+ARCHIVO_CONFIG = "config_bot.json"
+
+def cargar_config():
+    """Carga configuración local (admins y anuncios)"""
+    config_por_defecto = {
+        "administradores": [ADMIN_ID],
+        "anuncios": []
+    }
+    if os.path.exists(ARCHIVO_CONFIG):
+        try:
+            with open(ARCHIVO_CONFIG, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                for key in config_por_defecto:
+                    if key not in data:
+                        data[key] = config_por_defecto[key]
+                return data
+        except (json.JSONDecodeError, IOError):
+            return config_por_defecto
+    return config_por_defecto
+
+def guardar_config(config):
+    """Guarda configuración local"""
+    with open(ARCHIVO_CONFIG, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+# Cargar configuración al iniciar
+datos = cargar_config()
 
 # ===== FUNCIONES AUXILIARES =====
 def esc(texto):
@@ -99,7 +128,7 @@ async def limpiar_expirados():
         logger.info(f"🗑️ Purgados {resultado.deleted_count} listados expirados.")
 
 def get_anuncio_actual():
-    """Obtiene el anuncio rotativo actual (cambia cada 4 horas, sin consumir internet extra)"""
+    """Obtiene el anuncio rotativo actual (cambia cada 4 horas)"""
     anuncios = datos.get("anuncios", [])
     if not anuncios: return ""
     index = (datetime.now().hour // 4) % len(anuncios)
@@ -155,11 +184,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await enviar_menu_mensaje(update, user_id)
     except Exception as e:
         logger.error(f"❌ Error en /start: {e}")
+        await update.message.reply_text("⚠️ Error de conexión. Intenta de nuevo.")
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["estado"] = None
     user_id = str(update.effective_user.id)
-    await update.message.reply_text("↩️ Operación cancelada.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("↩️ Cancelado.", reply_markup=ReplyKeyboardRemove())
     await enviar_menu_mensaje(update, user_id)
 
 async def forzar_provincia(update, context):
@@ -632,13 +662,13 @@ async def destacar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    if int(user_id) != ADMIN_ID: return # Solo el admin principal
+    if int(user_id) != ADMIN_ID: return
     if not context.args: return await update.message.reply_text("Uso: <code>/addadmin TELEGRAM_ID</code>", parse_mode="HTML")
     try: new_admin = int(context.args[0])
     except: return await update.message.reply_text("ID debe ser un número.")
     if new_admin not in datos.get("administradores", [ADMIN_ID]):
         datos.setdefault("administradores", [ADMIN_ID]).append(new_admin)
-        guardar_datos(datos)
+        guardar_config(datos)
         await update.message.reply_text(f"✅ Admin {new_admin} agregado.")
     else:
         await update.message.reply_text("Ya es admin.")
@@ -652,7 +682,7 @@ async def del_admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if del_admin == ADMIN_ID: return await update.message.reply_text("No puedes eliminarte a ti mismo.")
     if del_admin in datos.get("administradores", []):
         datos["administradores"].remove(del_admin)
-        guardar_datos(datos)
+        guardar_config(datos)
         await update.message.reply_text(f"✅ Admin {del_admin} eliminado.")
     else:
         await update.message.reply_text("No estaba en la lista.")
@@ -669,13 +699,13 @@ async def anuncio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     datos.setdefault("anuncios", [])
     if accion == "add":
         datos["anuncios"].append(texto_anuncio)
-        guardar_datos(datos)
+        guardar_config(datos)
         await update.message.reply_text("✅ Anuncio añadido.")
     elif accion == "del":
         try:
             idx = int(texto_anuncio) - 1
             datos["anuncios"].pop(idx)
-            guardar_datos(datos)
+            guardar_config(datos)
             await update.message.reply_text("✅ Anuncio eliminado.")
         except:
             await update.message.reply_text("Número inválido.")
