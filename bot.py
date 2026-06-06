@@ -1,10 +1,11 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v2.5.1 | Fuzzy Matching | 2 Catálogos | Carrusel Anuncios | Sub-Admins
-Optimizado para conexiones lentas (Cuba)
+v2.6.0 | Fuzzy Matching | 2 Catálogos | Carrusel Anuncios | Sub-Admins
+Optimizado para conexiones lentas (Cuba) | Auto-reconexión MongoDB
 """
 
 import logging
+import json
 import os
 import re
 import html
@@ -12,6 +13,7 @@ import asyncio
 import hashlib
 import threading
 import signal
+import time
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -23,7 +25,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v2.5.1"
+VERSION = "v2.6.0"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -41,17 +43,33 @@ UMBRAL_FUZZY = 70
 
 BLACKLIST = ["zapatos", "ropa", "joyas", "comida", "pollo", "arroz", "telefono", "casa", "carro", "zapatillas", "frutas", "viveres"]
 
-# ===== CONEXIÓN A MONGODB =====
+# ===== CONEXIÓN A MONGODB CON TIMEOUTS =====
 MONGODB_URI = os.environ.get("MONGODB_URI")
 if not MONGODB_URI:
     logger.error("❌ FATAL: La variable de entorno MONGODB_URI no está configurada.")
 
-client = AsyncIOMotorClient(MONGODB_URI)
+# Timeouts: 5s conectar, 5s seleccionar, 10s respuesta
+client = AsyncIOMotorClient(
+    MONGODB_URI,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+    socketTimeoutMS=10000,
+    retryWrites=True
+)
 db = client.medicubadb
 
 coleccion_clientes = db.clientes
 coleccion_proveedores = db.proveedores
 coleccion_catalogos = db.catalogos
+
+async def verificar_mongodb():
+    """Verifica que MongoDB responda"""
+    try:
+        await client.admin.command('ping', serverSelectionTimeoutMS=3000)
+        return True
+    except Exception as e:
+        logger.error(f"❌ MongoDB no responde: {e}")
+        return False
 
 PROVINCIAS = [
     "Pinar del Río", "Artemisa", "La Habana", "Mayabeque", "Matanzas",
@@ -60,33 +78,25 @@ PROVINCIAS = [
     "Guantánamo", "Isla de la Juventud"
 ]
 
-# ===== CONFIGURACIÓN LOCAL (Admins y Anuncios) =====
+# ===== CONFIGURACIÓN LOCAL =====
 ARCHIVO_CONFIG = "config_bot.json"
 
 def cargar_config():
-    """Carga configuración local (admins y anuncios)"""
-    config_por_defecto = {
-        "administradores": [ADMIN_ID],
-        "anuncios": []
-    }
+    config_por_defecto = {"administradores": [ADMIN_ID], "anuncios": []}
     if os.path.exists(ARCHIVO_CONFIG):
         try:
             with open(ARCHIVO_CONFIG, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 for key in config_por_defecto:
-                    if key not in data:
-                        data[key] = config_por_defecto[key]
+                    if key not in data: data[key] = config_por_defecto[key]
                 return data
-        except (json.JSONDecodeError, IOError):
-            return config_por_defecto
+        except: return config_por_defecto
     return config_por_defecto
 
 def guardar_config(config):
-    """Guarda configuración local"""
     with open(ARCHIVO_CONFIG, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
-# Cargar configuración al iniciar
 datos = cargar_config()
 
 # ===== FUNCIONES AUXILIARES =====
@@ -122,13 +132,15 @@ def generar_hash(texto):
     return hashlib.md5(texto.encode('utf-8')).hexdigest()
 
 async def limpiar_expirados():
-    ahora = datetime.now()
-    resultado = await coleccion_catalogos.delete_many({"es_admin": True, "fecha_expiracion": {"$lt": agora}})
-    if resultado.deleted_count > 0:
-        logger.info(f"🗑️ Purgados {resultado.deleted_count} listados expirados.")
+    try:
+        agora = datetime.now()
+        resultado = await coleccion_catalogos.delete_many({"es_admin": True, "fecha_expiracion": {"$lt": agora}}, timeoutMS=5000)
+        if resultado.deleted_count > 0:
+            logger.info(f"🗑️ Purgados {resultado.deleted_count} listados expirados.")
+    except Exception as e:
+        logger.error(f"Error limpiando expirados: {e}")
 
 def get_anuncio_actual():
-    """Obtiene el anuncio rotativo actual (cambia cada 4 horas)"""
     anuncios = datos.get("anuncios", [])
     if not anuncios: return ""
     index = (datetime.now().hour // 4) % len(anuncios)
@@ -136,7 +148,6 @@ def get_anuncio_actual():
 
 def generar_menu_principal(user_id, provincia):
     anuncio = get_anuncio_actual()
-    
     teclado = [
         [InlineKeyboardButton("🔍 Buscar Medicina", callback_data="buscar")],
         [InlineKeyboardButton("📝 Publicar Catálogo", callback_data="publicar")],
@@ -147,7 +158,6 @@ def generar_menu_principal(user_id, provincia):
     ]
     if es_admin(user_id):
         teclado.append([InlineKeyboardButton("🔧 Admin", callback_data="admin_panel")])
-    
     texto = (f"{anuncio}"
              f"🏥 <b>MediCuba</b>\n🩺 Tu salud, nuestra prioridad\n\n"
              f"📍 <b>Tu provincia:</b> {esc(provincia)}\n\n"
@@ -155,6 +165,13 @@ def generar_menu_principal(user_id, provincia):
              f"¿Qué deseas hacer?\n\n"
              f"<i>MediCuba {VERSION}</i>")
     return texto, InlineKeyboardMarkup(teclado)
+
+def generar_menu_post_busqueda():
+    """Mini-menú después de una búsqueda (solo 2 botones)"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")],
+        [InlineKeyboardButton("🏠 Menú Principal", callback_data="volver")]
+    ])
 
 async def enviar_menu_callback(query, user_id):
     provincia_doc = await coleccion_clientes.find_one({"_id": user_id})
@@ -184,7 +201,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await enviar_menu_mensaje(update, user_id)
     except Exception as e:
         logger.error(f"❌ Error en /start: {e}")
-        await update.message.reply_text("⚠️ Error de conexión. Intenta de nuevo.")
+        await update.message.reply_text("⚠️ Error de conexión. Escribe /start de nuevo.")
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["estado"] = None
@@ -287,7 +304,7 @@ async def _mostrar_destacados(query):
     proveedores = await coleccion_proveedores.find({"destacado_hasta": {"$gt": datetime.now()}}).to_list(None)
     if not proveedores: 
         return await query.edit_message_text("⭐ No hay destacados actualmente.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Volver", callback_data="volver")]]), parse_mode="HTML")
-    mensaje = "⭐ <b>PROVEEDORES DESTACADOS</b> ⭐\n\nLos mejores y más confiables:\n\n"
+    mensaje = "⭐ <b>PROVEEDORES DESTACADOS</b> ⭐\n\nLos más confiables:\n\n"
     for p in proveedores[:5]:
         link = f"t.me/MediCubaBot?start=proveedor_{p['_id']}"
         mensaje += f"🏥 <b>{esc(p.get('nombre'))}</b>\n📞 {esc(p.get('contacto_mostrar'))}\n🔗 <a href='{link}'>Ver catálogo</a>\n\n"
@@ -304,31 +321,11 @@ async def _mostrar_ayuda(query):
     await query.edit_message_text("❓ <b>Centro de Ayuda</b>", reply_markup=InlineKeyboardMarkup(teclado), parse_mode="HTML")
 
 async def _mostrar_ayuda_detalle(query, data):
-    link = "\n\n🔗 Comparte el bot y salva vidas: <code>t.me/MediCubaBot</code>"
+    link = "\n\n🔗 Comparte el bot: <code>t.me/MediCubaBot</code>"
     textos = {
-        "ayuda_prov": (
-            "👨‍💼 <b>Para Proveedores</b>\n\n"
-            "¿Vendes medicinas? Este es tu lugar. Sube hasta 2 listados de medicamentos (80 líneas cada uno) con un simple copiar y pegar.\n\n"
-            "⭐ <b>Sistema de Estrellas:</b> Los proveedores destacados aparecen PRIMERO en las búsquedas y llevan la insignia ⭐. "
-            "Esto genera 3x más contactos. ¡Pregunta al Admin cómo destacar tu catálogo!\n\n"
-            "📞 Tú eliges cómo te contactan: WhatsApp, Telegram o ambos. Recibirás mensajes pre-escritos listos para responder."
-            f"{link}"
-        ), 
-        "ayuda_cli": (
-            "🛒 <b>Para Clientes</b>\n\n"
-            "Encontrar tu medicina nunca fue tan fácil. Nuestro buscador es inteligente: si escribes 'parasetamol' o 'gravinor', él entiende a qué te refieres.\n\n"
-            "⭐ <b>Proveedores Destacados:</b> En tus resultados, los proveedores ⭐ son los más confiables y rápidos. "
-            "Identificarlos es tu garantía de un mejor servicio.\n\n"
-            "📱 Un solo clic en 'Contactar' abrirá WhatsApp con el mensaje listo para enviar."
-            f"{link}"
-        ), 
-        "ayuda_gen": (
-            "⚙️ <b>General</b>\n\n"
-            "🩺 <b>MediCuba</b> conecta a quien necesita medicinas con quien las tiene, directo y sin intermediarios.\n\n"
-            "Tu provincia se configura una vez y tus búsquedas serán siempre locales. "
-            "Si viajas, cámbiala en un clic desde el menú."
-            f"{link}"
-        )
+        "ayuda_prov": ("👨‍💼 <b>Para Proveedores</b>\n\n¿Vendes medicinas? Sube hasta 2 listados (80 líneas) con copiar y pegar.\n\n⭐ <b>Sistema de Estrellas:</b> Los destacados aparecen PRIMERO y llevan ⭐. Genera 3x más contactos. ¡Pregunta al Admin!\n\n📞 Eliges cómo te contactan: WhatsApp, Telegram o ambos." + link), 
+        "ayuda_cli": ("🛒 <b>Para Clientes</b>\n\nBuscador inteligente: escribe como suene y encuentra. Acepta errores.\n\n⭐ <b>Proveedores Destacados:</b> Los ⭐ son los más confiables y rápidos.\n\n📱 Un clic en 'Contactar' abre WhatsApp con mensaje listo." + link), 
+        "ayuda_gen": ("⚙️ <b>General</b>\n\n🩺 <b>MediCuba</b> conecta pacientes con proveedores, directo y sin intermediarios.\n\nTu provincia se configura una vez. Si viajas, cámbiala en un clic." + link)
     }
     teclado = [
         [InlineKeyboardButton("💬 Consultar al Admin", url=f"https://t.me/{ADMIN_USERNAME}")],
@@ -396,12 +393,11 @@ async def _admin_dest(query):
 
 async def _admin_anuncios(query):
     anuncios = datos.get("anuncios", [])
-    mensaje = "📢 <b>Configurar Anuncios</b>\n\nAnuncios actuales (rotan cada 4h):\n\n"
-    if not anuncios:
-        mensaje += "<i>Vacío</i>\n"
+    mensaje = "📢 <b>Anuncios</b> (rotan cada 4h):\n\n"
+    if not anuncios: mensaje += "<i>Vacío</i>\n"
     else:
         for i, a in enumerate(anuncios, 1): mensaje += f"{i}. {esc(a)}\n"
-    mensaje += "\nComandos:\n/anuncio add <code>texto</code>\n/anuncio del <code>numero</code>"
+    mensaje += "\n<code>/anuncio add texto</code>\n<code>/anuncio del numero</code>"
     await query.edit_message_text(mensaje, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin_panel")]]), parse_mode="HTML")
 
 # ===== HANDLER ÚNICO DE MENSAJES =====
@@ -436,12 +432,12 @@ async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif estado == "esperando_seleccion": await _seleccion_sugerencia(update, context, user_id, texto)
         else:
             context.user_data["estado"] = None
-            await enviar_menu_mensaje(update, user_id)
+            await update.message.reply_text("Usa los botones del menú.")
     except Exception as e:
         logger.error(f"❌ Error: {e}")
         context.user_data["estado"] = None
-        await update.message.reply_text("⚠️ Error. Volviendo al menú.", reply_markup=ReplyKeyboardRemove())
-        await enviar_menu_mensaje(update, user_id)
+        # NO enviar menú principal automáticamente, solo mensaje de error
+        await update.message.reply_text("⚠️ Error de conexión. Intenta de nuevo.", reply_markup=ReplyKeyboardRemove())
 
 async def _cambio_provincia(update, context, user_id, texto):
     try:
@@ -463,9 +459,22 @@ async def _busqueda(update, context, user_id, texto):
     if not provincia: 
         await update.message.reply_text("❌ Configura provincia primero.", reply_markup=ReplyKeyboardRemove())
         return await enviar_menu_mensaje(update, user_id)
+    
     await coleccion_clientes.update_one({"_id": user_id}, {"$inc": {"busquedas": 1}})
     await limpiar_expirados()
-    catalogos_prov = await coleccion_catalogos.find({"provincia": provincia}).to_list(None)
+    
+    # Buscar con manejo de errores de MongoDB
+    try:
+        catalogos_prov = await coleccion_catalogos.find({"provincia": provincia}).to_list(None)
+    except Exception as e:
+        logger.error(f"❌ Error consultando MongoDB: {e}")
+        await update.message.reply_text(
+            "⚠️ Error de conexión a la base de datos. Intenta en unos segundos.",
+            reply_markup=generar_menu_post_busqueda()
+        )
+        context.user_data["estado"] = None
+        return
+    
     opciones = []
     for cat in catalogos_prov:
         prov_id = cat["proveedor_id"]
@@ -475,13 +484,20 @@ async def _busqueda(update, context, user_id, texto):
             score = rfuzz.WRatio(medicina_buscar, linea_norm)
             if score >= UMBRAL_FUZZY:
                 opciones.append({"score": score, "linea_original": cat["lineas_originales"][i], "proveedor": proveedor})
+    
     if not opciones:
-        teclado = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Buscar Otra", callback_data="buscar")], [InlineKeyboardButton("🏠 Menú", callback_data="volver")]])
-        await update.message.reply_text(f"❌ No hay '{esc(texto)}' en {esc(provincia)}.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-        await update.message.reply_text("¿Qué deseas hacer?", reply_markup=teclado)
+        # NO MOSTRAR MENÚ PRINCIPAL - Solo resultado + mini-menú
+        await update.message.reply_text(
+            f"❌ No encontré '<b>{esc(texto)}</b>' en {esc(provincia)}.\n\n"
+            f"💡 Revisa la ortografía o prueba con otro nombre.",
+            reply_markup=generar_menu_post_busqueda(),
+            parse_mode="HTML"
+        )
         context.user_data["estado"] = None
         return
+    
     opciones.sort(key=lambda x: x["score"], reverse=True)
+    
     if len(opciones) <= 5:
         mensaje = f"🔍 <b>{esc(texto.upper())}</b> en {esc(provincia)}\n\n✅ {len(opciones)} resultado(s):\n\n"
         enlace_wa = None
@@ -497,12 +513,13 @@ async def _busqueda(update, context, user_id, texto):
                     tel = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
                     if tel: enlace_wa = f"https://wa.me/{tel}?text=Hola%2C%20te%20contacto%20desde%20MediCuba%20(https%3A%2F%2Ft.me%2FMediCubaBot).%20Tienes%20{texto}%3F"
             mensaje += f"   • {esc(op['linea_original'])}\n"
+        
         botones = []
         if enlace_wa: botones.append([InlineKeyboardButton("📞 Contactar WhatsApp", url=enlace_wa)])
-        botones.append([InlineKeyboardButton("🔍 Buscar Otra", callback_data="buscar")])
-        botones.append([InlineKeyboardButton("🏠 Menú", callback_data="volver")])
-        await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-        await update.message.reply_text("¿Qué deseas hacer?", reply_markup=InlineKeyboardMarkup(botones))
+        botones.append([InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")])
+        botones.append([InlineKeyboardButton("🏠 Menú Principal", callback_data="volver")])
+        
+        await update.message.reply_text(mensaje, reply_markup=InlineKeyboardMarkup(botones), parse_mode="HTML")
         context.user_data["estado"] = None
     else:
         mensaje = f"🔍 <b>{esc(texto.upper())}</b> - Sugerencias:\n\n"
@@ -528,13 +545,15 @@ async def _seleccion_sugerencia(update, context, user_id, texto):
             if contacto.get("tipo") in ["whatsapp", "ambos"]:
                 tel = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
                 if tel: enlace_wa = f"https://wa.me/{tel}?text=Hola%2C%20te%20contacto%20desde%20MediCuba%20(https%3A%2F%2Ft.me%2FMediCubaBot).%20Tienes%20esto%3F"
-            botones = [[InlineKeyboardButton("🔍 Buscar Otra", callback_data="buscar")], [InlineKeyboardButton("🏠 Menú", callback_data="volver")]]
-            if enlace_wa: botones.insert(0, [InlineKeyboardButton("📞 WhatsApp", url=enlace_wa)])
-            await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-            await update.message.reply_text("¿Qué deseas hacer?", reply_markup=InlineKeyboardMarkup(botones))
+            
+            botones = []
+            if enlace_wa: botones.append([InlineKeyboardButton("📞 WhatsApp", url=enlace_wa)])
+            botones.append([InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")])
+            botones.append([InlineKeyboardButton("🏠 Menú Principal", callback_data="volver")])
+            await update.message.reply_text(mensaje, reply_markup=InlineKeyboardMarkup(botones), parse_mode="HTML")
         else: raise ValueError
     except ValueError:
-        await update.message.reply_text("Número inválido o Volver.")
+        await update.message.reply_text("Número inválido o presiona Volver.")
     context.user_data["estado"] = None
 
 async def _listado(update, context, user_id, texto):
@@ -594,9 +613,8 @@ async def _finalizar_registro(update, context, user_id):
     else:
         link = f"t.me/MediCubaBot?start=proveedor_{user_id}"
         mensaje = f"✅ <b>¡Catálogo publicado!</b>\n\n📋 Líneas: {context.user_data.get('medicinas_count', 0)}\n📞 Contacto: {esc(proveedor.get('contacto_mostrar'))}\n\n🔗 <b>Tu link:</b>\n<code>{link}</code>"
-    teclado = [[InlineKeyboardButton("🏠 Menú", callback_data="volver")]]
-    await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-    await update.message.reply_text("¿Qué deseas hacer?", reply_markup=InlineKeyboardMarkup(teclado))
+    teclado = [[InlineKeyboardButton("🏠 Menú Principal", callback_data="volver")]]
+    await update.message.reply_text(mensaje, reply_markup=InlineKeyboardMarkup(teclado), parse_mode="HTML")
     context.user_data["estado"] = None
 
 # ===== COMANDOS ADMIN =====
@@ -692,10 +710,8 @@ async def anuncio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not es_admin(user_id): return
     if not context.args or len(context.args) < 2: 
         return await update.message.reply_text("Uso:\n<code>/anuncio add Texto del anuncio</code>\n<code>/anuncio del 1</code>", parse_mode="HTML")
-    
     accion = context.args[0].lower()
     texto_anuncio = " ".join(context.args[1:])
-    
     datos.setdefault("anuncios", [])
     if accion == "add":
         datos["anuncios"].append(texto_anuncio)
@@ -710,13 +726,35 @@ async def anuncio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             await update.message.reply_text("Número inválido.")
 
-# ===== SERVIDOR HEALTH CHECK =====
+# ===== SERVIDOR HEALTH CHECK PARA RENDER =====
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Health check que también verifica MongoDB"""
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'OK')
+        if self.path == '/health':
+            try:
+                loop = asyncio.new_event_loop()
+                resultado = loop.run_until_complete(verificar_mongodb())
+                loop.close()
+                if resultado:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b'OK')
+                else:
+                    self.send_response(503)
+                    self.send_header('Content-type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b'MONGODB_DOWN')
+            except:
+                self.send_response(503)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'ERROR')
+        else:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
     def log_message(self, format, *args): pass
 
 def iniciar_health_check():
@@ -724,12 +762,22 @@ def iniciar_health_check():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    logger.info(f"✅ Health check en puerto {port}")
 
 # ===== MAIN =====
 async def post_init(app):
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    await coleccion_catalogos.create_index([("provincia", 1)])
-    await coleccion_catalogos.create_index([("proveedor_id", 1)])
+    logger.info("🧹 Limpiando webhooks...")
+    try: await app.bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e: logger.error(f"Error webhook: {e}")
+    logger.info("🔧 Verificando MongoDB...")
+    if await verificar_mongodb():
+        logger.info("✅ MongoDB OK. Creando índices...")
+        try:
+            await coleccion_catalogos.create_index([("provincia", 1)])
+            await coleccion_catalogos.create_index([("proveedor_id", 1)])
+        except Exception as e: logger.error(f"⚠️ Índices: {e}")
+    else:
+        logger.warning("⚠️ MongoDB no disponible. El bot puede fallar.")
 
 def main():
     if not TOKEN or not MONGODB_URI:
@@ -746,12 +794,23 @@ def main():
     application.add_handler(CommandHandler("addadmin", add_admin_cmd))
     application.add_handler(CommandHandler("deladmin", del_admin_cmd))
     application.add_handler(CommandHandler("anuncio", anuncio_cmd))
-    
     application.add_handler(CallbackQueryHandler(manejador_callbacks))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensajes))
     
     logger.info(f"🤖 MediCuba {VERSION} iniciado...")
-    application.run_polling(drop_pending_updates=True)
+    
+    # Auto-reconexión
+    last_error = 0
+    while True:
+        try:
+            application.run_polling(drop_pending_updates=True)
+        except Exception as e:
+            now = time.time()
+            if now - last_error > 30:
+                logger.error(f"❌ Error en polling: {e}")
+                last_error = now
+            logger.info("🔄 Reintentando en 10s...")
+            time.sleep(10)
 
 if __name__ == "__main__":
     main()
