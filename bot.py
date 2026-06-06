@@ -191,17 +191,17 @@ async def manejador_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not cliente or not cliente.get("provincia"):
             return await query.edit_message_text("❌ Primero configura tu provincia.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📍 Configurar", callback_data="cambiar_provincia")]]))
         context.user_data["estado"] = "esperando_medicina"
-        await query.edit_message_text("🔍 <b>Buscar Medicina</b>\n\nEscribe el nombre (acepta errores ortográficos):\n\n<i>Ej:</i> <code>parasetamol</code>", parse_mode="HTML")
-        await context.bot.send_message(chat_id=user_id, text="⬇️ Escribe la medicina o presiona Volver:", reply_markup=teclado_volver)  
+        await query.edit_message_text("🔍 <b>Buscar Medicina</b>", parse_mode="HTML")
+        await context.bot.send_message(chat_id=user_id, text="Escribe el nombre (acepta errores ortográficos):\n\n<i>Ej: parasetamol</i>", reply_markup=teclado_volver, parse_mode="HTML")  
     elif data == "publicar":
         context.user_data["estado"] = "esperando_listado"
-        await query.edit_message_text("📝 <b>Publicar Catálogo</b>\n\n📋 Pega aquí tu listado.\n\n⚠️ <b>Reglas:</b>\n• Máximo 80 líneas por catálogo.\n• Puedes tener hasta <b>2 catálogos activos</b>.\n• Si subes un 3ro, el más antiguo se elimina.\n• Solo medicinas (sin ropa, comida, etc).", parse_mode="HTML")
-        await context.bot.send_message(chat_id=user_id, text="⬇️ Pega tu listado o presiona Volver:", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"], ["❌ Cancelar"]], resize_keyboard=True))   
+        await query.edit_message_text("📝 <b>Publicar Catálogo</b>", parse_mode="HTML")
+        await context.bot.send_message(chat_id=user_id, text="📋 Pega aquí tu listado.\n\n⚠️ <b>Reglas:</b>\n• Máximo 80 líneas.\n• Puedes tener <b>2 catálogos activos</b>.\n• Si subes un 3ro, el más antiguo se elimina.\n• Solo medicinas.", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"], ["❌ Cancelar"]], resize_keyboard=True), parse_mode="HTML")   
     elif data == "cambiar_provincia":
         context.user_data["estado"] = "cambiando_provincia"
         lista = "\n".join([f"{i+1}. {p}" for i, p in enumerate(PROVINCIAS)])
-        await query.edit_message_text(f"📍 <b>Cambiar Provincia</b>\n\n{lista}\n\nResponde con el NÚMERO:", parse_mode="HTML")
-        await context.bot.send_message(chat_id=user_id, text="⬇️ Escribe el número o presiona Volver:", reply_markup=teclado_volver)    
+        await query.edit_message_text("📍 <b>Cambiar Provincia</b>", parse_mode="HTML")
+        await context.bot.send_message(chat_id=user_id, text=f"{lista}\n\nResponde con el NÚMERO:", reply_markup=teclado_volver)    
     elif data == "mi_perfil": await _mostrar_perfil(query, user_id)     
     elif data == "editar_contacto":
         context.user_data["editando_contacto"] = True
@@ -273,12 +273,12 @@ async def _procesar_contacto_callback(query, context, data):
     teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
     if tipo in ["whatsapp", "ambos"]:
         context.user_data["estado"] = "esperando_telefono"
-        await query.edit_message_text("📱 Escribe tu WhatsApp (ej: <code>+53 5 1234567</code>):", parse_mode="HTML")
-        await context.bot.send_message(chat_id=query.from_user.id, text="⬇️ Escribe el número o presiona Volver:", reply_markup=teclado_volver)
+        await query.edit_message_text("📱 <b>Contacto WhatsApp</b>", parse_mode="HTML")
+        await context.bot.send_message(chat_id=query.from_user.id, text="Escribe tu número (ej: <code>+53 5 1234567</code>):", reply_markup=teclado_volver, parse_mode="HTML")
     else:
         context.user_data["estado"] = "esperando_telegram"
-        await query.edit_message_text("✈️ Escribe tu @usuario de Telegram:", parse_mode="HTML")
-        await context.bot.send_message(chat_id=query.from_user.id, text="⬇️ Escribe el usuario o presiona Volver:", reply_markup=teclado_volver)
+        await query.edit_message_text("✈️ <b>Contacto Telegram</b>", parse_mode="HTML")
+        await context.bot.send_message(chat_id=query.from_user.id, text="Escribe tu @usuario de Telegram:", reply_markup=teclado_volver)
 
 async def _admin_panel(query):
     teclado = [[InlineKeyboardButton("📥 Cargar Listado", callback_data="admin_cargar")], [InlineKeyboardButton("📊 Estadísticas", callback_data="admin_stats")], [InlineKeyboardButton("👥 Proveedores", callback_data="admin_provs")], [InlineKeyboardButton("⭐ Destacar", callback_data="admin_dest")], [InlineKeyboardButton("🏠 Volver", callback_data="volver")]]
@@ -287,8 +287,9 @@ async def _admin_panel(query):
 async def _admin_acciones(query, context, user_id, data):
     if data == "admin_cargar":
         context.user_data["estado"] = "admin_esperando_telefono_listado"
-        await query.edit_message_text("📥 <b>Cargar Listado Admin</b>\n\nEnvía el número de teléfono de WhatsApp para este listado (ej: <code>+5351234567</code>):", parse_mode="HTML")
-        await context.bot.send_message(chat_id=user_id, text="⬇️ Escribe el número o presiona Volver:", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True))
+        await query.edit_message_text("📥 <b>Cargar Listado Admin</b>", parse_mode="HTML")
+        teclado_volver = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
+        await context.bot.send_message(chat_id=user_id, text="Envía el número de teléfono de WhatsApp para este listado (ej: <code>+5351234567</code>):", reply_markup=teclado_volver, parse_mode="HTML")
     elif data == "admin_stats": await _admin_stats(query)
     elif data == "admin_provs": await _admin_provs(query)
     elif data == "admin_dest": await _admin_dest(query)
@@ -349,7 +350,6 @@ async def procesar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif estado == "admin_esperando_listado": await _admin_listado(update, context, user_id, texto)
         elif estado == "esperando_seleccion": await _seleccion_sugerencia(update, context, user_id, texto)
         else:
-            # Si llega aquí, está en un estado no manejado (ej: esperando_contacto). Resetear.
             context.user_data["estado"] = None
             await update.message.reply_text("⚠️ Acción no reconocida. Volviendo al menú.", reply_markup=ReplyKeyboardRemove())
             await enviar_menu_mensaje(update, user_id)
@@ -420,11 +420,12 @@ async def _busqueda(update, context, user_id, texto):
                 contacto = p.get("contacto", {})
                 if contacto.get("tipo") in ["whatsapp", "ambos"] and not enlace_wa:
                     tel = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
-                    if tel: enlace_wa = f"https://wa.me/{tel}?text=Hola%20te%20contacto%20desde%20MediCuba.%20Tienes%20{texto}?"
+                    # MENSAJE MEJORADO CON LINK DEL BOT
+                    if tel: enlace_wa = f"https://wa.me/{tel}?text=Hola%2C%20te%20contacto%20desde%20MediCuba%20(https%3A%2F%2Ft.me%2FMediCubaBot).%20Tienes%20disponible%20{texto}%3F"
             mensaje += f"   • {esc(op['linea_original'])}\n"
         
         botones = []
-        if enlace_wa: botones.append([InlineKeyboardButton("📞 WhatsApp", url=enlace_wa)])
+        if enlace_wa: botones.append([InlineKeyboardButton("📞 Contactar WhatsApp", url=enlace_wa)])
         botones.append([InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")])
         botones.append([InlineKeyboardButton("🏠 Menú", callback_data="volver")])
         
@@ -455,9 +456,10 @@ async def _seleccion_sugerencia(update, context, user_id, texto):
             contacto = p.get("contacto", {})
             if contacto.get("tipo") in ["whatsapp", "ambos"]:
                 tel = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
-                if tel: enlace_wa = f"https://wa.me/{tel}?text=Hola%20te%20contacto%20desde%20MediCuba.%20Tienes%20esto?"
+                # MENSAJE MEJORADO CON LINK DEL BOT
+                if tel: enlace_wa = f"https://wa.me/{tel}?text=Hola%2C%20te%20contacto%20desde%20MediCuba%20(https%3A%2F%2Ft.me%2FMediCubaBot).%20Tienes%20disponible%20esto%3F"
             botones = [[InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar")], [InlineKeyboardButton("🏠 Menú", callback_data="volver")]]
-            if enlace_wa: botones.insert(0, [InlineKeyboardButton("📞 WhatsApp", url=enlace_wa)])
+            if enlace_wa: botones.insert(0, [InlineKeyboardButton("📞 Contactar WhatsApp", url=enlace_wa)])
             await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
             await update.message.reply_text("¿Qué deseas hacer?", reply_markup=InlineKeyboardMarkup(botones))
         else: raise ValueError
