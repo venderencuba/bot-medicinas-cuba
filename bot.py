@@ -249,7 +249,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["estado"] = None # Limpiar estado para evitar bloqueos
         await enviar_menu_cb(q, uid)
     elif d == "compartir":
-        await q.message.reply_text("📋 <b>Copia el enlace para compartir MediCuba:</b>\n\n<code>t.me/MediCubaBot</code>", parse_mode="HTML")
+        tk_back = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Volver al Menú", callback_data="volver")]])
+        await q.message.reply_text("📋 <b>Copia el enlace para compartir MediCuba:</b>\n\n<code>t.me/MediCubaBot</code>", reply_markup=tk_back, parse_mode="HTML")
     elif d == "soporte":
         context.user_data["estado"] = "soporte_esperando_msg"
         await q.edit_message_text("📞 <b>Soporte MediCuba</b>\n\nEscribe tu duda o propuesta. El equipo te responderá aquí.", parse_mode="HTML")
