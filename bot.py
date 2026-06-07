@@ -589,7 +589,12 @@ async def _busqueda(update, context, uid, txt):
         msg = f"🔍 <b>{esc(txt.upper())}</b> - Sugerencias:\n\n"
         sugs = ops[:15]; context.user_data["sugs"] = sugs
         for i, o in enumerate(sugs, 1): 
-            dest = "⭐ " if now_cuba < o["p"].get("destacado_hasta", datetime.min) else ""
+            dest_hasta = o["p"].get("destacado_hasta")
+            is_dest = False
+            if dest_hasta:
+                try: is_dest = now_cuba < dest_hasta
+                except: pass
+            dest = "⭐ " if is_dest else ""
             msg += f"{i}. {dest}{esc(o['l'])}\n"
         
         botones_num = []
