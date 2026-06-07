@@ -1,6 +1,6 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v2.8.1 | Fuzzy Matching | Carrusel Anuncios | Admin Enumerados | Config en BD | Marketing
+v2.9.0 | Fuzzy Matching | Admin/Prov Unificados | Marketing | Sin Emojis
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -25,7 +25,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v2.8.1"
+VERSION = "v2.9.0"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ if not TOKEN:
 
 MAX_LINEAS_CATALOGO = 80
 MAX_CATALOGOS_PROVEEDOR = 2
-DIAS_EXPIRACION_ADMIN = 10
+DIAS_EXPIRACION = 20 # Unificado para todos
 UMBRAL_FUZZY = 70
 BOT_LINK = "https://t.me/MediCubaBot"
 
@@ -86,6 +86,28 @@ def normalizar_texto(t):
     t = t.lower()
     for a, b in {'á':'a','é':'e','í':'i','ó':'o','ú':'u','ü':'u'}.items(): t = t.replace(a, b)
     return re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', ' ', t)).strip()
+
+def eliminar_emojis(t):
+    patron_emoji = re.compile("["
+        u"\U0001F600-\U0001F64F"
+        u"\U0001F300-\U0001F5FF"
+        u"\U0001F680-\U0001F6FF"
+        u"\U0001F1E0-\U0001F1FF"
+        u"\U00002702-\U000027B0"
+        u"\U000024C2-\U0001F251"
+        u"\U0001f926-\U0001f937"
+        u"\U00010000-\U0010ffff"
+        u"\u2640-\u2642"
+        u"\u2600-\u2B55"
+        u"\u200d"
+        u"\u23cf"
+        u"\u23e9"
+        u"\u231a"
+        u"\ufe0f"
+        u"\u3030"
+        "]+", flags=re.UNICODE)
+    return patron_emoji.sub('', t)
+
 def es_admin(uid): return int(uid) in datos.get("administradores", [ADMIN_ID])
 async def es_destacado(p):
     if not p or not p.get("destacado_hasta"): return False
@@ -99,7 +121,7 @@ def contiene_no_medicos(t):
 def generar_hash(t): return hashlib.md5(t.encode('utf-8')).hexdigest()
 async def limpiar_expirados():
     try:
-        r = await coleccion_catalogos.delete_many({"es_admin": True, "fecha_expiracion": {"$lt": datetime.now()}})
+        r = await coleccion_catalogos.delete_many({"fecha_expiracion": {"$lt": datetime.now()}})
         if r.deleted_count: logger.info(f"🗑️ Purgados {r.deleted_count} expirados")
     except: pass
 
@@ -117,8 +139,18 @@ async def get_lineas_por_provincia():
     except:
         return {}
 
+async def get_ultima_actualizacion():
+    try:
+        cat = await coleccion_catalogos.find_one(sort=[("fecha_creacion", -1)])
+        if cat and cat.get("fecha_creacion"):
+            if cat["fecha_creacion"].date() == datetime.now().date():
+                return f"🕐 Actualizado: {cat['fecha_creacion'].strftime('%d/%b %H:%M')}\n"
+        return ""
+    except:
+        return ""
+
 # ===== MENÚS =====
-def menu_principal(uid, prov, anuncio_idx=0):
+def menu_principal(uid, prov, anuncio_idx=0, ultima_act=""):
     a_list = datos.get("anuncios", [])
     msg_anuncio = ""
     tk_anuncio = []
@@ -140,17 +172,15 @@ def menu_principal(uid, prov, anuncio_idx=0):
         [InlineKeyboardButton("📍 Cambiar Provincia", callback_data="cambiar_provincia")],
         [InlineKeyboardButton("👤 Mi Perfil", callback_data="mi_perfil")],
         [InlineKeyboardButton("⭐ Destacados", callback_data="destacados")],
-        [InlineKeyboardButton("❓ Ayuda", callback_data="ayuda")]
+        [InlineKeyboardButton("❓ Ayuda", callback_data="ayuda")],
+        [InlineKeyboardButton("📋 Compartir MediCuba", url="https://t.me/MediCubaBot")]
     ]
     if es_admin(uid): tk.append([InlineKeyboardButton("🔧 Admin", callback_data="admin_panel")])
     
     final_tk = tk_anuncio + tk
     
     ver = VERSION.replace('v', '')
-    link_str = "t.me/MediCubaBot"
-    padded_link = link_str + " " * max(1, 28 - len(link_str)) + ver
-    
-    t = f"🏥 <b>MediCuba</b>\n🩺 Tu salud, nuestra prioridad\n\n📍 <b>Provincia:</b> {esc(prov)}\n\n<code>{padded_link}</code>{msg_anuncio}"
+    t = f"🏥 <b>MediCuba</b>\n🩺 Tu salud, nuestra prioridad\n\n{ultima_act}📍 <b>Provincia:</b> {esc(prov)}{msg_anuncio}\n\n<code>{ver}</code>"
     return t, InlineKeyboardMarkup(final_tk)
 
 def menu_post_busqueda():
@@ -159,14 +189,16 @@ def menu_post_busqueda():
 async def enviar_menu_cb(q, uid, anuncio_idx=0):
     doc = await coleccion_clientes.find_one({"_id": uid})
     p = doc.get("provincia", "No seleccionada") if doc else "No seleccionada"
-    t, tk = menu_principal(uid, p, anuncio_idx)
+    ult = await get_ultima_actualizacion()
+    t, tk = menu_principal(uid, p, anuncio_idx, ult)
     try: await q.edit_message_text(t, reply_markup=tk, parse_mode="HTML")
     except: await q.message.reply_text(t, reply_markup=tk, parse_mode="HTML")
 
 async def enviar_menu_msg(upd, uid, anuncio_idx=0):
     doc = await coleccion_clientes.find_one({"_id": uid})
     p = doc.get("provincia", "No seleccionada") if doc else "No seleccionada"
-    t, tk = menu_principal(uid, p, anuncio_idx)
+    ult = await get_ultima_actualizacion()
+    t, tk = menu_principal(uid, p, anuncio_idx, ult)
     await upd.message.reply_text(t, reply_markup=tk, parse_mode="HTML")
 
 # ===== COMANDOS =====
@@ -174,17 +206,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     user = update.effective_user
     try:
-        # Guardar/Actualizar datos del cliente para marketing
         await coleccion_clientes.update_one(
             {"_id": uid}, 
-            {"$set": {
-                "nombre": user.first_name, 
-                "username": user.username, 
-                "ultima_actividad": datetime.now()
-            }, "$setOnInsert": {"provincia": None, "busquedas": 0, "fecha_registro": datetime.now()}}, 
+            {"$set": {"nombre": user.first_name, "username": user.username, "ultima_actividad": datetime.now()}, "$setOnInsert": {"provincia": None, "busquedas": 0, "fecha_registro": datetime.now()}}, 
             upsert=True
         )
-
         if context.args and context.args[0].startswith("proveedor_"):
             pid = context.args[0].replace("proveedor_", "")
             await mostrar_cat_prov(update, pid); return
@@ -205,51 +231,51 @@ async def forzar_prov(update, context):
     context.user_data["estado"] = "cambiando_provincia"
     conteos = await get_lineas_por_provincia()
     lista = "\n".join([f"{i+1}. {p} ({conteos.get(p, 0)})" for i, p in enumerate(PROVINCIAS)])
-    await update.message.reply_text(f"👋 ¡Bienvenido!\n\n📍 Selecciona:\n\n{lista}\n\nNÚMERO:", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True))
+    tk = [[InlineKeyboardButton("🔙 Volver", callback_data="volver_forzado")]]
+    await update.message.reply_text(f"👋 ¡Bienvenido!\n\n📍 Selecciona:\n\n{lista}\n\nNÚMERO:", reply_markup=InlineKeyboardMarkup(tk))
 
 async def mostrar_cat_prov(update, pid):
     prov = await coleccion_proveedores.find_one({"_id": pid})
     if not prov: return await update.message.reply_text("❌ No encontrado.")
-    cats = await coleccion_catalogos.find({"proveedor_id": pid, "es_admin": False}).to_list(None)
+    cats = await coleccion_catalogos.find({"proveedor_id": pid}).to_list(None)
     if not cats: return await update.message.reply_text("📭 Sin catálogos.")
-    msg = f"🏥 <b>{esc(prov.get('nombre'))}</b>\n"
-    if await es_destacado(prov): msg += "⭐ <b>Destacado</b> ⭐\n"
-    msg += f"📞 {esc(prov.get('contacto_mostrar', 'N/A'))}\n" + "─"*20 + "\n\n"
+    msg = f"🏥 <b>{esc(prov.get('nombre'))}</b>\n📞 {esc(prov.get('contacto_mostrar', 'N/A'))}\n" + "─"*20 + "\n\n"
     for i, c in enumerate(cats, 1):
         msg += f"<b>Catálogo {i}:</b>\n"
         for l in c["lineas_originales"][:30]: msg += f"• {esc(l)}\n"
         msg += "\n"
     msg += "─"*20 + "\n🩺 MediCuba"
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Ir al Bot", callback_data="volver")]]), parse_mode="HTML")
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Ir al Bot", url="https://t.me/MediCubaBot")]]), parse_mode="HTML")
 
 # ===== CALLBACKS =====
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     uid = str(q.from_user.id); d = q.data
-    tv = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
     
     if d == "ignore": return
     elif d.startswith("anuncio_"):
         idx = int(d.split("_")[1])
         await enviar_menu_cb(q, uid, anuncio_idx=idx)
-    elif d == "volver": await enviar_menu_cb(q, uid)
+    elif d == "volver" or d == "volver_forzado": await enviar_menu_cb(q, uid)
     elif d == "buscar":
         c = await coleccion_clientes.find_one({"_id": uid})
         if not c or not c.get("provincia"):
             return await q.edit_message_text("❌ Configura provincia.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📍 Configurar", callback_data="cambiar_provincia")]]))
         context.user_data["estado"] = "esperando_medicina"
         await q.edit_message_text("🔍 <b>Buscar Medicina</b>", parse_mode="HTML")
-        await context.bot.send_message(uid, "Escribe el nombre:\n\n<i>Ej: gravinol</i>", reply_markup=tv, parse_mode="HTML")
+        tk_back = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Volver al Menú", callback_data="volver")]])
+        await context.bot.send_message(uid, "Escribe el nombre:\n\n<i>Ej: gravinol</i>", reply_markup=tk_back, parse_mode="HTML")
     elif d == "publicar":
         context.user_data["estado"] = "esperando_listado"
         await q.edit_message_text("📝 <b>Publicar Catálogo</b>", parse_mode="HTML")
-        await context.bot.send_message(uid, "📋 Pega tu listado (máx 80 líneas, 2 catálogos, solo medicinas).", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"], ["❌ Cancelar"]], resize_keyboard=True), parse_mode="HTML")
+        await context.bot.send_message(uid, "📋 Pega tu listado (máx 80 líneas, solo medicinas).", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"], ["❌ Cancelar"]], resize_keyboard=True), parse_mode="HTML")
     elif d == "cambiar_provincia":
         context.user_data["estado"] = "cambiando_provincia"
         conteos = await get_lineas_por_provincia()
         lista = "\n".join([f"{i+1}. {p} ({conteos.get(p, 0)})" for i, p in enumerate(PROVINCIAS)])
         await q.edit_message_text("📍 <b>Cambiar Provincia</b>", parse_mode="HTML")
-        await context.bot.send_message(uid, f"{lista}\n\nNÚMERO:", reply_markup=tv)
+        tk_back = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="volver")]])
+        await context.bot.send_message(uid, f"{lista}\n\nNÚMERO:", reply_markup=tk_back)
     elif d == "mi_perfil": await _perfil(q, uid)
     elif d == "editar_contacto":
         context.user_data["editando_contacto"] = True
@@ -267,7 +293,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _perfil(q, uid):
     prov = await coleccion_proveedores.find_one({"_id": uid})
     if prov:
-        cc = await coleccion_catalogos.count_documents({"proveedor_id": uid, "es_admin": False})
+        cc = await coleccion_catalogos.count_documents({"proveedor_id": uid})
         msg = f"👤 <b>Perfil Proveedor</b>\n\n📛 {esc(prov.get('nombre'))}\n📞 {esc(prov.get('contacto_mostrar'))}\n📋 Catálogos: {cc}/2\n"
         if prov.get('link_token'): msg += f"🔗 <code>t.me/MediCubaBot?start=proveedor_{uid}</code>\n"
         tk = [[InlineKeyboardButton("✏️ Editar Contacto", callback_data="editar_contacto")], [InlineKeyboardButton("📋 Ver Catálogo", callback_data="ver_mi_catalogo")], [InlineKeyboardButton("🏠 Volver", callback_data="volver")]]
@@ -278,7 +304,7 @@ async def _perfil(q, uid):
     await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(tk), parse_mode="HTML")
 
 async def _mi_cat(q, uid):
-    cats = await coleccion_catalogos.find({"proveedor_id": uid, "es_admin": False}).sort("fecha_creacion", 1).to_list(None)
+    cats = await coleccion_catalogos.find({"proveedor_id": uid}).sort("fecha_creacion", 1).to_list(None)
     if not cats: return await q.edit_message_text("📭 Sin catálogos.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 Publicar", callback_data="publicar")], [InlineKeyboardButton("🔙", callback_data="mi_perfil")]]), parse_mode="HTML")
     msg = f"📋 <b>Tus Catálogos</b> ({len(cats)}/2)\n\n"
     for i, c in enumerate(cats, 1):
@@ -310,21 +336,21 @@ async def _ayuda_det(q, d):
 async def _contacto_cb(q, context, d):
     tipo = d.replace("contacto_", "")
     context.user_data["tipo_contacto"] = tipo
-    tv = ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True)
     if tipo in ["whatsapp", "ambos"]:
         context.user_data["estado"] = "esperando_telefono"
         await q.edit_message_text("📱 <b>WhatsApp</b>", parse_mode="HTML")
-        await context.bot.send_message(q.from_user.id, "Escribe tu número (ej: <code>+53 5 1234567</code>):", reply_markup=tv, parse_mode="HTML")
+        await context.bot.send_message(q.from_user.id, "Escribe tu número (ej: <code>+53 5 1234567</code>):", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True), parse_mode="HTML")
     else:
         context.user_data["estado"] = "esperando_telegram"
         await q.edit_message_text("✈️ <b>Telegram</b>", parse_mode="HTML")
-        await context.bot.send_message(q.from_user.id, "Escribe tu @usuario:", reply_markup=tv)
+        await context.bot.send_message(q.from_user.id, "Escribe tu @usuario:", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True))
 
 async def _admin_panel(q):
     tk = [
         [InlineKeyboardButton("📥 Cargar", callback_data="admin_cargar"), InlineKeyboardButton("➕ Añadir Admin", callback_data="admin_add_admin")],
         [InlineKeyboardButton("📊 Stats", callback_data="admin_stats"), InlineKeyboardButton("👥 Provs", callback_data="admin_provs")],
         [InlineKeyboardButton("⭐ Destacar", callback_data="admin_dest"), InlineKeyboardButton("📢 Anuncios", callback_data="admin_anuncios")],
+        [InlineKeyboardButton("✉️ Enviar Mensaje", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🏠 Volver", callback_data="volver")]
     ]
     await q.edit_message_text("🔧 <b>Admin</b>", reply_markup=InlineKeyboardMarkup(tk), parse_mode="HTML")
@@ -342,6 +368,7 @@ async def _admin_acc(q, context, uid, d):
     elif d == "admin_provs": await _admin_provs(q)
     elif d == "admin_dest": await _admin_dest(q)
     elif d == "admin_anuncios": await _admin_anun(q)
+    elif d == "admin_broadcast": await _admin_broadcast_ini(q)
 
 async def _admin_stats(q):
     await limpiar_expirados()
@@ -374,6 +401,14 @@ async def _admin_anun(q):
     msg += "\n<code>/anuncio add texto</code>\n<code>/anuncio del N</code>"
     await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_panel")]]), parse_mode="HTML")
 
+async def _admin_broadcast_ini(q):
+    tk = [
+        [InlineKeyboardButton("🏥 A Proveedores", callback_data="broadcast_prov")],
+        [InlineKeyboardButton("🛒 A Clientes", callback_data="broadcast_cli")],
+        [InlineKeyboardButton("🔙", callback_data="admin_panel")]
+    ]
+    await q.edit_message_text("✉️ <b>Enviar Mensaje</b>\n\n¿A quién deseas enviarle un mensaje?", reply_markup=InlineKeyboardMarkup(tk), parse_mode="HTML")
+
 # ===== MENSAJES =====
 async def proc_msgs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -396,6 +431,7 @@ async def proc_msgs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif est == "admin_esperando_tel": await _admin_tel(update, context, uid, txt)
         elif est == "admin_esperando_listado": await _admin_list(update, context, uid, txt)
         elif est == "admin_esperando_id_nuevo": await _admin_add_id_msg(update, context, uid, txt)
+        elif est == "admin_esperando_broadcast_msg": await _admin_broadcast_msg(update, context, uid, txt)
         elif est == "esperando_seleccion": await _seleccion(update, context, uid, txt)
         else: context.user_data["estado"] = None
     except Exception as e:
@@ -438,9 +474,7 @@ async def _busqueda(update, context, uid, txt):
         await update.message.reply_text("❌ Configura provincia.", reply_markup=ReplyKeyboardRemove())
         return await enviar_menu_msg(update, uid)
     
-    # Actualizar actividad de marketing
     await coleccion_clientes.update_one({"_id": uid}, {"$inc": {"busquedas": 1}, "$set": {"ultima_actividad": datetime.now()}})
-    
     await limpiar_expirados()
     try: cats = await coleccion_catalogos.find({"provincia": prov}).to_list(None)
     except: return await update.message.reply_text("⚠️ Error BD.", reply_markup=menu_post_busqueda())
@@ -531,22 +565,29 @@ async def _seleccion(update, context, uid, txt):
 
 # ===== LISTADO =====
 async def _listado(update, context, uid, txt):
-    if contiene_no_medicos(txt):
+    txt_limpio = eliminar_emojis(txt)
+    
+    if contiene_no_medicos(txt_limpio):
         context.user_data["estado"] = None
         await update.message.reply_text("❌ Productos no médicos.", reply_markup=ReplyKeyboardRemove())
         return await enviar_menu_msg(update, uid)
-    lns = [l.strip() for l in txt.split('\n') if l.strip()]
+    lns = [l.strip() for l in txt_limpio.split('\n') if l.strip()]
     tr = len(lns) > MAX_LINEAS_CATALOGO
     lns = lns[:MAX_LINEAS_CATALOGO]
     lns_n = [normalizar_texto(l) for l in lns]
-    cc = await coleccion_catalogos.count_documents({"proveedor_id": uid, "es_admin": False})
+    
+    # Política unificada: Máximo 2 por proveedor
+    cc = await coleccion_catalogos.count_documents({"proveedor_id": uid})
     if cc >= MAX_CATALOGOS_PROVEEDOR:
-        ol = await coleccion_catalogos.find_one({"proveedor_id": uid, "es_admin": False}, sort=[("fecha_creacion", 1)])
+        ol = await coleccion_catalogos.find_one({"proveedor_id": uid}, sort=[("fecha_creacion", 1)])
         if ol: await coleccion_catalogos.delete_one({"_id": ol["_id"]})
+        
     cd = await coleccion_clientes.find_one({"_id": uid})
     pr = cd.get("provincia", "Santiago de Cuba") if cd else "Santiago de Cuba"
     await coleccion_proveedores.update_one({"_id": uid}, {"$set": {"nombre": update.effective_user.first_name or "Prov", "provincia": pr, "link_token": uid}}, upsert=True)
-    await coleccion_catalogos.insert_one({"proveedor_id": uid, "lineas_originales": lns, "lineas_normalizadas": lns_n, "es_admin": False, "fecha_creacion": datetime.now(), "fecha_expiracion": None, "provincia": pr, "hash": generar_hash(txt)})
+    
+    expiracion = datetime.now() + timedelta(days=DIAS_EXPIRACION)
+    await coleccion_catalogos.insert_one({"proveedor_id": uid, "lineas_originales": lns, "lineas_normalizadas": lns_n, "fecha_creacion": datetime.now(), "fecha_expiracion": expiracion, "provincia": pr, "hash": generar_hash(txt_limpio)})
     av = f"\n⚠️ Solo {MAX_LINEAS_CATALOGO} líneas." if tr else ""
     context.user_data["estado"] = "esperando_contacto"; context.user_data["mc"] = len(lns)
     tk = [[InlineKeyboardButton("📱 WhatsApp", callback_data="contacto_whatsapp"), InlineKeyboardButton("✈️ Telegram", callback_data="contacto_telegram"), InlineKeyboardButton("📞 Ambos", callback_data="contacto_ambos")]]
@@ -555,7 +596,17 @@ async def _listado(update, context, uid, txt):
 # ===== CONTACTO PROVEEDOR =====
 async def _telefono(update, context, uid, txt):
     tel = txt.strip(); tipo = context.user_data.get("tipo_contacto", "whatsapp")
-    await coleccion_proveedores.update_one({"_id": uid}, {"$set": {"contacto.tipo": tipo, "contacto.whatsapp": tel, "contacto_mostrar": tel, "nombre": update.effective_user.first_name or "Prov"}})
+    
+    # Lógica Anti-Duplicados: Si el admin subió algo con este tel, vinculalo
+    existing_prov = await coleccion_proveedores.find_one({"contacto.whatsapp": tel, "_id": {"$ne": uid}})
+    if existing_prov:
+        old_pid = existing_prov["_id"]
+        await coleccion_catalogos.update_many({"proveedor_id": old_pid}, {"$set": {"proveedor_id": uid}})
+        await coleccion_proveedores.delete_one({"_id": old_pid})
+        await coleccion_proveedores.update_one({"_id": uid}, {"$set": {"contacto.tipo": tipo, "contacto.whatsapp": tel, "contacto_mostrar": tel, "nombre": update.effective_user.first_name or existing_prov.get('nombre'), "provincia": existing_prov.get('provincia'), "link_token": uid}}, upsert=True)
+    else:
+        await coleccion_proveedores.update_one({"_id": uid}, {"$set": {"contacto.tipo": tipo, "contacto.whatsapp": tel, "contacto_mostrar": tel, "nombre": update.effective_user.first_name or "Prov"}})
+
     if tipo == "ambos":
         context.user_data["estado"] = "esperando_telegram"
         return await update.message.reply_text("✈️ Ahora tu @usuario de Telegram:", reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True))
@@ -597,27 +648,62 @@ async def _admin_list(update, context, uid, txt):
     if not es_admin(uid): return
     tel = context.user_data.get("admin_tel")
     if not tel: context.user_data["estado"] = None; await update.message.reply_text("❌ Falta teléfono.", reply_markup=ReplyKeyboardRemove()); return await enviar_menu_msg(update, uid)
-    h = generar_hash(txt)
+    
+    txt_limpio = eliminar_emojis(txt)
+    h = generar_hash(txt_limpio)
     if await coleccion_catalogos.find_one({"hash": h}): context.user_data["estado"] = None; await update.message.reply_text("⚠️ Duplicado.", reply_markup=ReplyKeyboardRemove()); return await enviar_menu_msg(update, uid)
-    if contiene_no_medicos(txt): context.user_data["estado"] = None; await update.message.reply_text("❌ No médicos.", reply_markup=ReplyKeyboardRemove()); return await enviar_menu_msg(update, uid)
-    lns = [l.strip() for l in txt.split('\n') if l.strip()][:MAX_LINEAS_CATALOGO]
+    if contiene_no_medicos(txt_limpio): context.user_data["estado"] = None; await update.message.reply_text("❌ No médicos.", reply_markup=ReplyKeyboardRemove()); return await enviar_menu_msg(update, uid)
+    lns = [l.strip() for l in txt_limpio.split('\n') if l.strip()][:MAX_LINEAS_CATALOGO]
     lns_n = [normalizar_texto(l) for l in lns]
     
-    # Lógica de enumeración de Admin
-    num_admin = datos.get("siguiente_num_admin", 1)
-    nombre_admin = f"{num_admin} Admin MediCuba"
+    # Buscar si ya existe un proveedor con ese WhatsApp para evitar duplicados
+    pid = f"admin_{uid}_{int(datetime.now().timestamp())}"
+    existing_prov = await coleccion_proveedores.find_one({"contacto.whatsapp": tel})
+    if existing_prov:
+        pid = existing_prov["_id"] # Usar el ID existente
+    else:
+        num_admin = datos.get("siguiente_num_admin", 1)
+        nombre_admin = f"{num_admin} Admin MediCuba"
+        await coleccion_proveedores.update_one({"_id": pid}, {"$set": {"nombre": nombre_admin, "contacto": {"tipo": "whatsapp", "whatsapp": tel}, "contacto_mostrar": tel, "provincia": "Santiago de Cuba"}}, upsert=True)
+        datos["siguiente_num_admin"] = num_admin + 1
+        await guardar_config(datos)
+
+    # Política unificada: Máximo 2 por proveedor (teléfono)
+    cc = await coleccion_catalogos.count_documents({"proveedor_id": pid})
+    if cc >= MAX_CATALOGOS_PROVEEDOR:
+        ol = await coleccion_catalogos.find_one({"proveedor_id": pid}, sort=[("fecha_creacion", 1)])
+        if ol: await coleccion_catalogos.delete_one({"_id": ol["_id"]})
+
+    expiracion = datetime.now() + timedelta(days=DIAS_EXPIRACION)
+    await coleccion_catalogos.insert_one({"proveedor_id": pid, "lineas_originales": lns, "lineas_normalizadas": lns_n, "fecha_creacion": datetime.now(), "fecha_expiracion": expiracion, "provincia": "Santiago de Cuba", "hash": h})
     
-    apid = f"admin_{uid}_{int(datetime.now().timestamp())}"
-    await coleccion_proveedores.update_one({"_id": apid}, {"$set": {"nombre": nombre_admin, "contacto": {"tipo": "whatsapp", "whatsapp": tel}, "contacto_mostrar": tel, "provincia": "Santiago de Cuba"}}, upsert=True)
-    exp = datetime.now() + timedelta(days=DIAS_EXPIRACION_ADMIN)
-    await coleccion_catalogos.insert_one({"proveedor_id": apid, "lineas_originales": lns, "lineas_normalizadas": lns_n, "es_admin": True, "fecha_creacion": datetime.now(), "fecha_expiracion": exp, "provincia": "Santiago de Cuba", "hash": h})
-    
-    # Actualizar el contador en la BD
-    datos["siguiente_num_admin"] = num_admin + 1
-    await guardar_config(datos)
-    
-    await update.message.reply_text(f"✅ {len(lns)} líneas.\n📞 {esc(tel)}\n📛 Publicado como: {esc(nombre_admin)}", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
+    prv_data = await coleccion_proveedores.find_one({"_id": pid})
+    await update.message.reply_text(f"✅ {len(lns)} líneas.\n📞 {esc(tel)}\n📛 Publicado como: {esc(prv_data.get('nombre'))}", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
     await enviar_menu_msg(update, uid); context.user_data["estado"] = None; context.user_data["admin_tel"] = None
+
+# ===== BROADCAST =====
+async def _admin_broadcast_msg(update, context, uid, txt):
+    tipo = context.user_data.get("broadcast_tipo")
+    if not tipo: return
+    
+    usr = await coleccion_clientes.find_one({"_id": uid})
+    prov_name = usr.get("nombre", "MediCuba") if usr else "MediCuba"
+    
+    enviado = 0; error = 0
+    if tipo == "prov":
+        users = await coleccion_proveedores.find({}).to_list(None)
+    else:
+        users = await coleccion_clientes.find({}).to_list(None)
+        
+    for u in users:
+        try:
+            await context.bot.send_message(u["_id"], f"📢 <b>Mensaje de MediCuba:</b>\n\n{txt}", parse_mode="HTML")
+            enviado += 1
+        except: error += 1
+            
+    await update.message.reply_text(f"✅ Mensaje enviado a {enviado} usuarios. ({error} errores/bloqueados)", reply_markup=ReplyKeyboardRemove())
+    context.user_data["estado"] = None; context.user_data["broadcast_tipo"] = None
+    await enviar_menu_msg(update, uid)
 
 async def destacar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not es_admin(update.effective_user.id): return
@@ -655,6 +741,17 @@ async def anuncio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: datos["anuncios"].pop(int(t) - 1); await guardar_config(datos); await update.message.reply_text("✅ Eliminado.")
         except: await update.message.reply_text("N inválido.")
 
+# ===== BROADCAST CALLBACK =====
+async def callbacks_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q: return
+    await q.answer()
+    uid = str(q.from_user.id); d = q.data
+    if d in ["broadcast_prov", "broadcast_cli"] and es_admin(uid):
+        context.user_data["broadcast_tipo"] = "prov" if d == "broadcast_prov" else "cli"
+        context.user_data["estado"] = "admin_esperando_broadcast_msg"
+        await q.edit_message_text("✉️ <b>Enviar Mensaje</b>\n\nEscribe el mensaje a enviar:", parse_mode="HTML")
+
 # ===== HEALTH CHECK =====
 class HCH(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -668,12 +765,13 @@ def iniciar_hc():
 
 # ===== MAIN =====
 async def post_init(app):
-    await init_config() # Cargar configuración desde MongoDB al arrancar
+    await init_config()
     try: await app.bot.delete_webhook(drop_pending_updates=True)
     except: pass
     try:
         await coleccion_catalogos.create_index([("provincia", 1)])
         await coleccion_catalogos.create_index([("proveedor_id", 1)])
+        await coleccion_catalogos.create_index([("fecha_expiracion", 1)])
     except: pass
 
 def main():
@@ -688,7 +786,11 @@ def main():
     app.add_handler(CommandHandler("addadmin", add_admin_cmd))
     app.add_handler(CommandHandler("deladmin", del_admin_cmd))
     app.add_handler(CommandHandler("anuncio", anuncio_cmd))
+    
+    # Handler especial para broadcast
+    app.add_handler(CallbackQueryHandler(callbacks_broadcast, pattern=r'^broadcast_'))
     app.add_handler(CallbackQueryHandler(callbacks))
+    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, proc_msgs))
     logger.info(f"🤖 MediCuba {VERSION}")
     le = 0
