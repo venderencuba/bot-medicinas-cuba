@@ -1,6 +1,6 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v2.9.1 | Fuzzy Matching | Admin/Prov Unificados | Marketing | Soporte Anónimo | TZ Cuba
+v2.9.2 | Fuzzy Matching | Destacados 1ro | Soporte | TZ Cuba
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -26,7 +26,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v2.9.1"
+VERSION = "v2.9.2"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = int(d.split("_")[1])
         await enviar_menu_cb(q, uid, anuncio_idx=idx)
     elif d == "volver" or d == "volver_forzado": 
-        context.user_data["estado"] = None # Limpiar estado para evitar bloqueos
+        context.user_data["estado"] = None 
         await enviar_menu_cb(q, uid)
     elif d == "compartir":
         tk_back = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Volver al Menú", callback_data="volver")]])
@@ -260,6 +260,29 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["reply_to"] = target_uid
         context.user_data["estado"] = "admin_esperando_reply"
         await q.edit_message_text("✉️ <b>Responder</b>\n\nEscribe la respuesta para el usuario:", parse_mode="HTML")
+    elif d.startswith("sel_"):
+        idx = int(d.split("_")[1]) - 1
+        sugs = context.user_data.get("sugs", [])
+        if 0 <= idx < len(sugs):
+            o = sugs[idx]; prv = o["p"]
+            dest = "⭐ " if await es_destacado(prv) else ""
+            nombre_prov = prv.get('nombre', 'Prov')
+            msg = f"🏥 {dest}<b>{esc(nombre_prov)}</b>\n📞 {esc(prv.get('contacto_mostrar'))}\n\n💊 {esc(o['l'])}\n"
+            botones = []
+            contacto = prv.get("contacto", {})
+            tel_wa = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
+            tel_tg = contacto.get("telegram", "")
+            if tel_wa:
+                wa_msg = f"Hola, te contacto desde MediCuba ({BOT_LINK}). ¿Tienes disponible esto?"
+                wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
+                botones.append([InlineKeyboardButton(f"📞 WA: {esc(nombre_prov)}", url=wa_url)])
+            if tel_tg:
+                tg_url = f"https://t.me/{tel_tg.replace('@','')}"
+                botones.append([InlineKeyboardButton(f"✈️ TG: {esc(nombre_prov)}", url=tg_url)])
+            botones.append([InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar"), InlineKeyboardButton("🏠 Menú", callback_data="volver")])
+            await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(botones), parse_mode="HTML")
+        else:
+            await q.answer("Selección inválida", show_alert=True)
     elif d == "buscar":
         c = await coleccion_clientes.find_one({"_id": uid})
         if not c or not c.get("provincia"):
@@ -491,7 +514,7 @@ async def _admin_reply(update, context, uid, txt):
     context.user_data["estado"] = None
     context.user_data["reply_to"] = None
 
-# ===== BÚSQUEDA =====
+# ===== BÚSQUEDA (Destacados primero, Botones numéricos) =====
 async def _busqueda(update, context, uid, txt):
     mb = normalizar_texto(txt)
     c = await coleccion_clientes.find_one({"_id": uid})
@@ -518,7 +541,15 @@ async def _busqueda(update, context, uid, txt):
         await update.message.reply_text(f"❌ No encontré '<b>{esc(txt)}</b>' en {esc(prov)}.", reply_markup=menu_post_busqueda(), parse_mode="HTML")
         context.user_data["estado"] = None; return
     
-    ops.sort(key=lambda x: x["s"], reverse=True)
+    # ORDENAR: Destacados primero, luego por puntuación
+    now_cuba = datetime.now(TZ_CUBA)
+    def sort_key(x):
+        is_dest = False
+        if x["p"].get("destacado_hasta"):
+            try: is_dest = now_cuba < x["p"]["destacado_hasta"]
+            except: pass
+        return (is_dest, x["s"])
+    ops.sort(key=sort_key, reverse=True)
     
     por_prov = {}
     for o in ops:
@@ -556,10 +587,22 @@ async def _busqueda(update, context, uid, txt):
         context.user_data["estado"] = None
     else:
         msg = f"🔍 <b>{esc(txt.upper())}</b> - Sugerencias:\n\n"
-        sugs = ops[:10]; context.user_data["sugs"] = sugs
-        for i, o in enumerate(sugs, 1): msg += f"{i}. {esc(o['l'])}\n"
-        msg += "\nResponde el NÚMERO."
-        await update.message.reply_text(msg, reply_markup=ReplyKeyboardMarkup([["🔙 Volver al Menú"]], resize_keyboard=True), parse_mode="HTML")
+        sugs = ops[:15]; context.user_data["sugs"] = sugs
+        for i, o in enumerate(sugs, 1): 
+            dest = "⭐ " if now_cuba < o["p"].get("destacado_hasta", datetime.min) else ""
+            msg += f"{i}. {dest}{esc(o['l'])}\n"
+        
+        botones_num = []
+        fila = []
+        for i in range(1, len(sugs)+1):
+            fila.append(InlineKeyboardButton(str(i), callback_data=f"sel_{i}"))
+            if i % 5 == 0 or i == len(sugs):
+                botones_num.append(fila)
+                fila = []
+                
+        botones_num.append([InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar"), InlineKeyboardButton("🏠 Menú", callback_data="volver")])
+        
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(botones_num), parse_mode="HTML")
         context.user_data["estado"] = "esperando_seleccion"
 
 async def _seleccion(update, context, uid, txt):
@@ -585,9 +628,11 @@ async def _seleccion(update, context, uid, txt):
                 botones.append([InlineKeyboardButton(f"✈️ TG: {esc(nombre_prov)}", url=tg_url)])
             botones.append([InlineKeyboardButton("🔍 Nueva Búsqueda", callback_data="buscar"), InlineKeyboardButton("🏠 Menú", callback_data="volver")])
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(botones), parse_mode="HTML")
-        else: raise ValueError
-    except ValueError: await update.message.reply_text("Número inválido.")
-    context.user_data["estado"] = None
+            context.user_data["estado"] = None
+        else:
+            await _busqueda(update, context, uid, txt)
+    except ValueError:
+        await _busqueda(update, context, uid, txt)
 
 # ===== LISTADO =====
 async def _listado(update, context, uid, txt):
