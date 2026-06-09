@@ -1,6 +1,6 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v3.0.0 | Referidos | Ban/Reportes | Textos BD | Notificaciones Admin
+v3.0.1 | Fix Ayuda | Fix Referidos Perfil | Notificaciones Admin
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -26,12 +26,12 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v3.0.0"
+VERSION = "v3.0.1"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = "814338625" # Mantener como string para consistencia con BD
+ADMIN_ID = "814338625" 
 ADMIN_USERNAME = "TuUsuarioAqui"
 
 if not TOKEN:
@@ -258,12 +258,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         result = await coleccion_clientes.update_one({"_id": uid}, {"$set": update_fields, "$setOnInsert": set_on_insert}, upsert=True)
         
-        # Notificación de nuevo usuario (sonará en el móvil del admin)
         if result.upserted_id:
             try: await context.bot.send_message(ADMIN_ID, f"👋 <b>Nuevo usuario registrado</b>\n👤 {esc(user.first_name)}\n🆔 <code>{uid}</code>", parse_mode="HTML")
             except: pass
             
-        # Si ya existía pero no tenía referido y entra por link
         if referido_por and not result.upserted_id:
             await coleccion_clientes.update_one({"_id": uid, "referido_por": {"$exists": False}}, {"$set": {"referido_por": referido_por}})
             
@@ -372,6 +370,10 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "ayuda": await _ayuda(q)
     elif d.startswith("ayuda_"): await _ayuda_det(q, d)
     elif d.startswith("contacto_"): await _contacto_cb(q, context, d)
+    elif d == "perfil_referidos":
+        link = f"https://t.me/MediCubaBot?start=ref_{uid}"
+        msg = f"🎁 <b>Invita y Gana</b>\n\nComparte este enlace:\n<code>{link}</code>\n\nCuando tus amigos configuren su provincia y hagan su primera búsqueda, sumarás referidos."
+        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="mi_perfil")]]), parse_mode="HTML")
     elif d == "admin_panel" and es_admin(uid): await _admin_panel(q)
     elif d.startswith("admin_") and es_admin(uid): await _admin_acc(q, context, uid, d)
 
@@ -414,9 +416,16 @@ async def _destacados(q):
     await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Volver", callback_data="volver")]]), parse_mode="HTML", disable_web_page_preview=True)
 
 async def _ayuda(q):
-    tk = [[InlineKeyboardButton("👨‍💼 Proveedores", callback_data="ayuda_prov")], [InlineKeyboardButton("🛒 Clientes", callback_data="ayuda_cli")], [InlineKeyboardButton("⚙️ General", callback_data="ayuda_gen")], [InlineKeyboardButton("📜 Reglas", callback_data="ayuda_reglas")]]
-    if datos.get("promo_activa", False): tk.append([InlineKeyboardButton("🎁 Referidos", callback_data="ayuda_referidos")])
-    tk.extend([[[InlineKeyboardButton("📞 Soporte", callback_data="soporte")]], [[InlineKeyboardButton("🏠 Volver", callback_data="volver")]]])
+    tk = [
+        [InlineKeyboardButton("👨‍💼 Proveedores", callback_data="ayuda_prov")], 
+        [InlineKeyboardButton("🛒 Clientes", callback_data="ayuda_cli")], 
+        [InlineKeyboardButton("⚙️ General", callback_data="ayuda_gen")], 
+        [InlineKeyboardButton("📜 Reglas", callback_data="ayuda_reglas")]
+    ]
+    if datos.get("promo_activa", False): 
+        tk.append([InlineKeyboardButton("🎁 Referidos", callback_data="ayuda_referidos")])
+    tk.append([InlineKeyboardButton("📞 Soporte", callback_data="soporte")])
+    tk.append([InlineKeyboardButton("🏠 Volver", callback_data="volver")])
     await q.edit_message_text("❓ <b>Ayuda</b>", reply_markup=InlineKeyboardMarkup(tk), parse_mode="HTML")
 
 async def _ayuda_det(q, d):
@@ -864,10 +873,6 @@ async def callbacks_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif d == "admin_stop_promo" and es_admin(uid):
         await desactivar_promo(context)
         await q.edit_message_text("🏁 Promo desactivada y contadores reseteados.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_panel")]]), parse_mode="HTML")
-    elif d == "perfil_referidos":
-        link = f"https://t.me/MediCubaBot?start=ref_{uid}"
-        msg = f"🎁 <b>Invita y Gana</b>\n\nComparte este enlace:\n<code>{link}</code>\n\nCuando tus amigos configuren su provincia y hagan su primera búsqueda, sumarás referidos."
-        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="mi_perfil")]]), parse_mode="HTML")
 
 # ===== HEALTH CHECK =====
 class HCH(BaseHTTPRequestHandler):
@@ -898,7 +903,7 @@ def main():
     app.add_handler(CommandHandler("addadmin", add_admin_cmd)); app.add_handler(CommandHandler("deladmin", del_admin_cmd))
     app.add_handler(CommandHandler("anuncio", anuncio_cmd))
     
-    app.add_handler(CallbackQueryHandler(callbacks_broadcast, pattern=r'^(broadcast_|admin_edit_|admin_stop_promo|perfil_referidos)'))
+    app.add_handler(CallbackQueryHandler(callbacks_broadcast, pattern=r'^(broadcast_|admin_edit_|admin_stop_promo)'))
     app.add_handler(CallbackQueryHandler(callbacks))
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, proc_msgs))
