@@ -1,6 +1,6 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v2.9.3 | Fuzzy Matching | Destacados 1ro | Soporte | TZ Cuba
+v2.9.4 | Anti-Crash | WA Mejorado | Destacados 1ro | TZ Cuba
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -26,7 +26,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v2.9.3"
+VERSION = "v2.9.4"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -51,12 +51,16 @@ MONGODB_URI = os.environ.get("MONGODB_URI")
 if not MONGODB_URI:
     logger.error("❌ FATAL: MONGODB_URI no configurado.")
 
-client = AsyncIOMotorClient(MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000, socketTimeoutMS=10000, retryWrites=True)
-db = client.medicubadb
-coleccion_clientes = db.clientes
-coleccion_proveedores = db.proveedores
-coleccion_catalogos = db.catalogos
-coleccion_config = db.config
+# Conexión segura
+try:
+    client = AsyncIOMotorClient(MONGODB_URI, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000, socketTimeoutMS=10000, retryWrites=True)
+    db = client.medicubadb
+    coleccion_clientes = db.clientes
+    coleccion_proveedores = db.proveedores
+    coleccion_catalogos = db.catalogos
+    coleccion_config = db.config
+except Exception as e:
+    logger.error(f"❌ Error conectando MongoDB: {e}")
 
 PROVINCIAS = ["Pinar del Río", "Artemisa", "La Habana", "Mayabeque", "Matanzas", "Cienfuegos", "Villa Clara", "Sancti Spíritus", "Ciego de Ávila", "Camagüey", "Las Tunas", "Granma", "Holguín", "Santiago de Cuba", "Guantánamo", "Isla de la Juventud"]
 
@@ -65,20 +69,27 @@ datos = {}
 
 async def init_config():
     global datos
-    doc = await coleccion_config.find_one({"_id": "main_config"})
-    if not doc:
-        doc = {"_id": "main_config", "administradores": [ADMIN_ID], "anuncios": [], "siguiente_num_admin": 1}
-        await coleccion_config.insert_one(doc)
-    defaults = {"administradores": [ADMIN_ID], "anuncios": [], "siguiente_num_admin": 1}
-    for k, v in defaults.items():
-        if k not in doc: doc[k] = v
-    datos = doc
+    try:
+        doc = await coleccion_config.find_one({"_id": "main_config"})
+        if not doc:
+            doc = {"_id": "main_config", "administradores": [ADMIN_ID], "anuncios": [], "siguiente_num_admin": 1}
+            await coleccion_config.insert_one(doc)
+        defaults = {"administradores": [ADMIN_ID], "anuncios": [], "siguiente_num_admin": 1}
+        for k, v in defaults.items():
+            if k not in doc: doc[k] = v
+        datos = doc
+    except Exception as e:
+        logger.error(f"❌ Error cargando config: {e}. Usando defaults.")
+        datos = {"_id": "main_config", "administradores": [ADMIN_ID], "anuncios": [], "siguiente_num_admin": 1}
 
 async def guardar_config(c):
     global datos
     datos = c
     save_data = {k: v for k, v in c.items() if k != "_id"}
-    await coleccion_config.update_one({"_id": "main_config"}, {"$set": save_data}, upsert=True)
+    try:
+        await coleccion_config.update_one({"_id": "main_config"}, {"$set": save_data}, upsert=True)
+    except Exception as e:
+        logger.error(f"❌ Error guardando config: {e}")
 
 # ===== AUXILIARES =====
 def esc(t):
@@ -169,7 +180,7 @@ def menu_principal(uid, prov, anuncio_idx=0, ultima_act=""):
     ver = VERSION.replace('v', '')
     title_str = f"MediCuba{ ' ' * (22 - len('MediCuba') - len(ver)) }{ver}"
     
-    t = f"<code>{title_str}</code>\n🩺 Tu salud, nuestra prioridad\n\n{ultima_act}📍 <b>Provincia:</b> {esc(prov)}{msg_anuncio}"
+    t = f"<code>{title_str}</code>\n🩺 Tu salud, nostra prioridad\n\n{ultima_act}📍 <b>Provincia:</b> {esc(prov)}{msg_anuncio}"
     return t, InlineKeyboardMarkup(final_tk)
 
 def menu_post_busqueda():
@@ -272,8 +283,9 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             contacto = prv.get("contacto", {})
             tel_wa = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
             tel_tg = contacto.get("telegram", "")
+            search_term = context.user_data.get("last_search", "esto")
             if tel_wa:
-                wa_msg = f"Hola, te contacto desde MediCuba ({BOT_LINK}). ¿Tienes disponible esto?"
+                wa_msg = f"🏥 MediCuba (t.me/MediCubaBot)\n\nHola, ¿Tienes disponible {search_term}?"
                 wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
                 botones.append([InlineKeyboardButton(f"💬 Ir WhatsApp: {esc(nombre_prov)}", url=wa_url)])
             if tel_tg:
@@ -514,9 +526,10 @@ async def _admin_reply(update, context, uid, txt):
     context.user_data["estado"] = None
     context.user_data["reply_to"] = None
 
-# ===== BÚSQUEDA (Destacados primero, Botones numéricos, Texto Opción 3) =====
+# ===== BÚSQUEDA (WA Mejorado, Destacados 1ro) =====
 async def _busqueda(update, context, uid, txt):
     mb = normalizar_texto(txt)
+    context.user_data["last_search"] = txt # Guardar para WhatsApp
     c = await coleccion_clientes.find_one({"_id": uid})
     prov = c.get("provincia") if c else None
     if not prov:
@@ -575,7 +588,7 @@ async def _busqueda(update, context, uid, txt):
             tel_tg = contacto.get("telegram", "")
             
             if tel_wa:
-                wa_msg = f"Hola, te contacto desde MediCuba ({BOT_LINK}). ¿Tienes disponible {txt}?"
+                wa_msg = f"🏥 MediCuba (t.me/MediCubaBot)\n\nHola, ¿Tienes disponible {txt}?"
                 wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
                 botones.append([InlineKeyboardButton(f"💬 Ir WhatsApp: {esc(nombre_prov)}", url=wa_url)])
             if tel_tg:
@@ -624,8 +637,9 @@ async def _seleccion(update, context, uid, txt):
             contacto = prv.get("contacto", {})
             tel_wa = contacto.get("whatsapp", "").replace("+", "").replace(" ", "")
             tel_tg = contacto.get("telegram", "")
+            search_term = context.user_data.get("last_search", "esto")
             if tel_wa:
-                wa_msg = f"Hola, te contacto desde MediCuba ({BOT_LINK}). ¿Tienes disponible esto?"
+                wa_msg = f"🏥 MediCuba (t.me/MediCubaBot)\n\nHola, ¿Tienes disponible {search_term}?"
                 wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
                 botones.append([InlineKeyboardButton(f"💬 Ir WhatsApp: {esc(nombre_prov)}", url=wa_url)])
             if tel_tg:
