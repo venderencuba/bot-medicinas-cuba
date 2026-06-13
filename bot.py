@@ -1,6 +1,6 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v3.0.1 | Fix Ayuda | Fix Referidos Perfil | Notificaciones Admin
+v3.0.2 | Anti-Crash Render | Auto-Healing HC | Memory Optimized
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -26,7 +26,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v3.0.1"
+VERSION = "v3.0.2"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -217,7 +217,7 @@ def menu_principal(uid, prov, anuncio_idx=0, ultima_act=""):
     if es_admin(uid): tk.append([InlineKeyboardButton("🔧 Admin", callback_data="admin_panel")])
     final_tk = tk_anuncio + tk
     ver = VERSION.replace('v', ''); title_str = f"MediCuba{ ' ' * (22 - len('MediCuba') - len(ver)) }{ver}"
-    t = f"<code>{title_str}</code>\n🩺 Tu salud, nuestra prioridad\n\n{ultima_act}📍 <b>Provincia:</b> {esc(prov)}{msg_anuncio}"
+    t = f"<code>{title_str}</code>\n🩺 Tu salud, nostra prioridad\n\n{ultima_act}📍 <b>Provincia:</b> {esc(prov)}{msg_anuncio}"
     return t, InlineKeyboardMarkup(final_tk)
 
 def menu_post_busqueda():
@@ -273,7 +273,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Error. Escribe /start")
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["estado"] = None
+    context.user_data.clear() # Limpiar memoria
     await update.message.reply_text("↩️ Cancelado.", reply_markup=ReplyKeyboardRemove())
     await enviar_menu_msg(update, str(update.effective_user.id))
 
@@ -309,7 +309,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d.startswith("anuncio_"):
         idx = int(d.split("_")[1]); await enviar_menu_cb(q, uid, anuncio_idx=idx)
     elif d == "volver" or d == "volver_forzado": 
-        context.user_data["estado"] = None; await enviar_menu_cb(q, uid)
+        context.user_data.clear(); await enviar_menu_cb(q, uid)
     elif d == "compartir":
         tk_back = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Volver al Menú", callback_data="volver")]])
         await q.message.reply_text("📋 <b>Copia el enlace para compartir MediCuba:</b>\n\n<code>t.me/MediCubaBot</code>", reply_markup=tk_back, parse_mode="HTML")
@@ -535,7 +535,7 @@ async def proc_msgs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 Estás baneado"); return
         
     if txt in ["🔙 Volver al Menú", "❌ Cancelar", "/cancelar", "/cancel"]:
-        context.user_data["estado"] = None; await update.message.reply_text("↩️", reply_markup=ReplyKeyboardRemove())
+        context.user_data.clear(); await update.message.reply_text("↩️", reply_markup=ReplyKeyboardRemove())
         return await enviar_menu_msg(update, uid)
         
     est = context.user_data.get("estado")
@@ -581,7 +581,7 @@ async def _cambiar_prov(update, context, uid, txt):
                 except: pass
                 await validar_referido(uid, context)
                 
-            context.user_data["estado"] = None; return await enviar_menu_msg(update, uid)
+            context.user_data.clear(); return await enviar_menu_msg(update, uid)
         else: raise ValueError
     except ValueError: await update.message.reply_text("Número inválido.")
 
@@ -593,7 +593,7 @@ async def _admin_add_id_msg(update, context, uid, txt):
             await update.message.reply_text(f"✅ Admin {na} añadido.", reply_markup=ReplyKeyboardRemove())
         else: await update.message.reply_text("Ese ID ya es administrador.", reply_markup=ReplyKeyboardRemove())
     except ValueError: await update.message.reply_text("ID inválido. Debe ser numérico.", reply_markup=ReplyKeyboardRemove())
-    context.user_data["estado"] = None; await enviar_menu_msg(update, uid)
+    context.user_data.clear(); await enviar_menu_msg(update, uid)
 
 # ===== SOPORTE =====
 async def _soporte_msg(update, context, uid, txt):
@@ -601,7 +601,7 @@ async def _soporte_msg(update, context, uid, txt):
     tk = [[InlineKeyboardButton("✉️ Responder", callback_data=f"reply_{uid}")]]
     await context.bot.send_message(ADMIN_ID, msg, reply_markup=InlineKeyboardMarkup(tk), parse_mode="HTML")
     await update.message.reply_text("✅ Mensaje enviado. Te responderemos pronto.", reply_markup=ReplyKeyboardRemove())
-    context.user_data["estado"] = None; await enviar_menu_msg(update, uid)
+    context.user_data.clear(); await enviar_menu_msg(update, uid)
 
 async def _admin_reply(update, context, uid, txt):
     target_uid = context.user_data.get("reply_to")
@@ -610,7 +610,7 @@ async def _admin_reply(update, context, uid, txt):
         await context.bot.send_message(target_uid, f"📩 <b>Respuesta de MediCuba:</b>\n\n{esc(txt)}", parse_mode="HTML")
         await update.message.reply_text("✅ Respuesta enviada.", reply_markup=ReplyKeyboardRemove())
     except Exception as e: await update.message.reply_text(f"❌ Error al enviar: {e}", reply_markup=ReplyKeyboardRemove())
-    context.user_data["estado"] = None; context.user_data["reply_to"] = None
+    context.user_data.clear()
 
 # ===== BÚSQUEDA =====
 async def _busqueda(update, context, uid, txt):
@@ -707,7 +707,7 @@ async def _seleccion(update, context, uid, txt):
 async def _listado(update, context, uid, txt):
     txt_limpio = eliminar_emojis(txt)
     if contiene_no_medicos(txt_limpio):
-        context.user_data["estado"] = None; await update.message.reply_text("❌ Productos no médicos.", reply_markup=ReplyKeyboardRemove()); return await enviar_menu_msg(update, uid)
+        context.user_data.clear(); await update.message.reply_text("❌ Productos no médicos.", reply_markup=ReplyKeyboardRemove()); return await enviar_menu_msg(update, uid)
     lns = [l.strip() for l in txt_limpio.split('\n') if l.strip()]; tr = len(lns) > MAX_LINEAS_CATALOGO; lns = lns[:MAX_LINEAS_CATALOGO]; lns_n = [normalizar_texto(l) for l in lns]
     cc = await coleccion_catalogos.count_documents({"proveedor_id": uid})
     if cc >= MAX_CATALOGOS_PROVEEDOR:
@@ -747,7 +747,7 @@ async def _fin_reg(update, context, uid):
     ed = context.user_data.get("editando_contacto", False); prv = await coleccion_proveedores.find_one({"_id": uid})
     if ed: msg = f"✅ Contacto actualizado:\n📞 {esc(prv.get('contacto_mostrar'))}"; context.user_data["editando_contacto"] = False
     else: lk = f"t.me/MediCubaBot?start=proveedor_{uid}"; msg = f"✅ <b>¡Publicado!</b>\n\n📋 {context.user_data.get('mc',0)} líneas\n📞 {esc(prv.get('contacto_mostrar'))}\n\n🔗 <code>{lk}</code>"
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menú", callback_data="volver")]]), parse_mode="HTML"); context.user_data["estado"] = None
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menú", callback_data="volver")]]), parse_mode="HTML"); context.user_data.clear()
 
 # ===== ADMIN CMDS =====
 async def admin_cargar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -783,7 +783,7 @@ async def _admin_list(update, context, uid, txt):
     await coleccion_catalogos.insert_one({"proveedor_id": pid, "lineas_originales": lns, "lineas_normalizadas": lns_n, "fecha_creacion": datetime.now(TZ_CUBA), "fecha_expiracion": expiracion, "provincia": "Santiago de Cuba", "hash": h})
     prv_data = await coleccion_proveedores.find_one({"_id": pid})
     await update.message.reply_text(f"✅ {len(lns)} líneas.\n📞 {esc(tel)}\n📛 Publicado como: {esc(prv_data.get('nombre'))}", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-    await enviar_menu_msg(update, uid); context.user_data["estado"] = None; context.user_data["admin_tel"] = None
+    await enviar_menu_msg(update, uid); context.user_data.clear()
 
 # ===== BROADCAST =====
 async def _admin_broadcast_msg(update, context, uid, txt):
@@ -796,7 +796,7 @@ async def _admin_broadcast_msg(update, context, uid, txt):
         try: await context.bot.send_message(u["_id"], f"📢 <b>Mensaje de MediCuba:</b>\n\n{esc(txt)}", parse_mode="HTML"); enviado += 1
         except: error += 1
     await update.message.reply_text(f"✅ Mensaje enviado a {enviado} usuarios. ({error} errores/bloqueados)", reply_markup=ReplyKeyboardRemove())
-    context.user_data["estado"] = None; context.user_data["broadcast_tipo"] = None; await enviar_menu_msg(update, uid)
+    context.user_data.clear(); await enviar_menu_msg(update, uid)
 
 # ===== BAN / UNBAN / TEXTS =====
 async def _admin_ban_msg(update, context, uid, txt):
@@ -805,7 +805,7 @@ async def _admin_ban_msg(update, context, uid, txt):
     await coleccion_clientes.update_one({"_id": bid}, {"$set": {"baneado": True}}, upsert=True)
     await coleccion_proveedores.update_one({"_id": bid}, {"$set": {"baneado": True}}, upsert=True)
     await update.message.reply_text(f"✅ Usuario <code>{bid}</code> baneado.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-    context.user_data["estado"] = None; await enviar_menu_msg(update, uid)
+    context.user_data.clear(); await enviar_menu_msg(update, uid)
 
 async def _admin_unban_msg(update, context, uid, txt):
     if not es_admin(uid): return
@@ -813,14 +813,14 @@ async def _admin_unban_msg(update, context, uid, txt):
     await coleccion_clientes.update_one({"_id": bid}, {"$set": {"baneado": False}}, upsert=True)
     await coleccion_proveedores.update_one({"_id": bid}, {"$set": {"baneado": False}}, upsert=True)
     await update.message.reply_text(f"✅ Usuario <code>{bid}</code> desbaneado.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-    context.user_data["estado"] = None; await enviar_menu_msg(update, uid)
+    context.user_data.clear(); await enviar_menu_msg(update, uid)
 
 async def _admin_edit_text(update, context, uid, txt, key):
     if not es_admin(uid): return
     datos.setdefault("textos", {})[key] = txt
     await guardar_config(datos)
     await update.message.reply_text(f"✅ Texto de {key} actualizado.", reply_markup=ReplyKeyboardRemove(), parse_mode="HTML")
-    context.user_data["estado"] = None; await enviar_menu_msg(update, uid)
+    context.user_data.clear(); await enviar_menu_msg(update, uid)
 
 async def destacar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not es_admin(update.effective_user.id): return
@@ -874,15 +874,30 @@ async def callbacks_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE
         await desactivar_promo(context)
         await q.edit_message_text("🏁 Promo desactivada y contadores reseteados.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_panel")]]), parse_mode="HTML")
 
-# ===== HEALTH CHECK =====
+# ===== HEALTH CHECK INDESTRUCTIBLE =====
 class HCH(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.send_header('Content-type', 'text/plain'); self.end_headers(); self.wfile.write(b'OK')
+    def do_GET(self):
+        try:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        except Exception:
+            pass
     def log_message(self, fmt, *a): pass
 
 def iniciar_hc():
     p = int(os.environ.get('PORT', 10000))
-    try: s = HTTPServer(('0.0.0.0', p), HCH); threading.Thread(target=s.serve_forever, daemon=True).start(); logger.info(f"✅ HC puerto {p}")
-    except Exception as e: logger.error(f"HC error: {e}")
+    def run_server():
+        while True:
+            try:
+                server = HTTPServer(('0.0.0.0', p), HCH)
+                server.serve_forever()
+            except Exception as e:
+                logger.error(f"HC error: {e}, reiniciando en 5s...")
+                time.sleep(5)
+    threading.Thread(target=run_server, daemon=True).start()
+    logger.info(f"✅ HC puerto {p} iniciado")
 
 # ===== MAIN =====
 async def post_init(app):
@@ -897,6 +912,7 @@ def main():
     if not TOKEN or not MONGODB_URI: logger.error("🛑 Faltan vars."); return
     iniciar_hc()
     app = Application.builder().token(TOKEN).post_init(post_init).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancelar", cancelar)); app.add_handler(CommandHandler("cancel", cancelar))
     app.add_handler(CommandHandler("admin_cargar_listado", admin_cargar)); app.add_handler(CommandHandler("destacar", destacar_cmd))
@@ -907,13 +923,13 @@ def main():
     app.add_handler(CallbackQueryHandler(callbacks))
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, proc_msgs))
+    
     logger.info(f"🤖 MediCuba {VERSION}")
-    le = 0
     while True:
-        try: app.run_polling(drop_pending_updates=True)
+        try:
+            app.run_polling(drop_pending_updates=True)
         except Exception as e:
-            n = time.time()
-            if n - le > 30: logger.error(f"Polling: {e}"); le = n
+            logger.error(f"Polling error: {e}, reiniciando en 10s...")
             time.sleep(10)
 
 if __name__ == "__main__":
