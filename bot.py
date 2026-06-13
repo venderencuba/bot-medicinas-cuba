@@ -1,22 +1,17 @@
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v3.0.2 | Anti-Crash Render | Auto-Healing HC | Memory Optimized
+v3.1.0 | Webhook Architecture | Anti-Sleep Render | Memory Optimized
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
 import logging
-import json
 import os
 import re
 import html
 import asyncio
 import hashlib
-import threading
-import signal
-import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -24,9 +19,10 @@ from telegram.ext import (
 )
 from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
+from aiohttp import web
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v3.0.2"
+VERSION = "v3.1.0"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -273,7 +269,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Error. Escribe /start")
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear() # Limpiar memoria
+    context.user_data.clear()
     await update.message.reply_text("↩️ Cancelado.", reply_markup=ReplyKeyboardRemove())
     await enviar_menu_msg(update, str(update.effective_user.id))
 
@@ -874,63 +870,72 @@ async def callbacks_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE
         await desactivar_promo(context)
         await q.edit_message_text("🏁 Promo desactivada y contadores reseteados.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_panel")]]), parse_mode="HTML")
 
-# ===== HEALTH CHECK INDESTRUCTIBLE =====
-class HCH(BaseHTTPRequestHandler):
-    def do_GET(self):
-        try:
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'OK')
-        except Exception:
-            pass
-    def log_message(self, fmt, *a): pass
+# ===== WEBHOOK SERVER =====
+async def health_check(request):
+    return web.Response(text="OK")
 
-def iniciar_hc():
-    p = int(os.environ.get('PORT', 10000))
-    def run_server():
-        while True:
-            try:
-                server = HTTPServer(('0.0.0.0', p), HCH)
-                server.serve_forever()
-            except Exception as e:
-                logger.error(f"HC error: {e}, reiniciando en 5s...")
-                time.sleep(5)
-    threading.Thread(target=run_server, daemon=True).start()
-    logger.info(f"✅ HC puerto {p} iniciado")
+async def webhook_handler(request):
+    application = request.app['ptb_app']
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.update_queue.put(update)
+    return web.Response()
 
-# ===== MAIN =====
-async def post_init(app):
+async def post_init(app: Application):
     await init_config()
-    try: await app.bot.delete_webhook(drop_pending_updates=True)
-    except: pass
     try:
         await coleccion_catalogos.create_index([("provincia", 1)]); await coleccion_catalogos.create_index([("proveedor_id", 1)]); await coleccion_catalogos.create_index([("fecha_expiracion", 1)])
     except: pass
 
+async def main_async():
+    if not TOKEN or not MONGODB_URI:
+        logger.error("🛑 Faltan vars."); return
+
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("cancelar", cancelar)); application.add_handler(CommandHandler("cancel", cancelar))
+    application.add_handler(CommandHandler("admin_cargar_listado", admin_cargar)); application.add_handler(CommandHandler("destacar", destacar_cmd))
+    application.add_handler(CommandHandler("addadmin", add_admin_cmd)); application.add_handler(CommandHandler("deladmin", del_admin_cmd))
+    application.add_handler(CommandHandler("anuncio", anuncio_cmd))
+    
+    application.add_handler(CallbackQueryHandler(callbacks_broadcast, pattern=r'^(broadcast_|admin_edit_|admin_stop_promo)'))
+    application.add_handler(CallbackQueryHandler(callbacks))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, proc_msgs))
+    
+    await application.initialize()
+    await application.start()
+    await application.updater.initialize()
+    await application.updater.start()
+    
+    PORT = int(os.environ.get('PORT', 10000))
+    RENDER_HOST = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+    
+    if RENDER_HOST:
+        webhook_url = f"https://{RENDER_HOST}/{TOKEN}"
+        await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        logger.info(f"✅ Webhook configurado en: {webhook_url}")
+    else:
+        logger.warning("⚠️ RENDER_EXTERNAL_HOSTNAME no detectado. Webhook no configurado (¿ejecución local?).")
+
+    web_app = web.Application()
+    web_app['ptb_app'] = application
+    web_app.router.add_get("/", health_check)
+    web_app.router.add_post(f"/{TOKEN}", webhook_handler)
+    
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"✅ Servidor Web escuchando en puerto {PORT}")
+    
+    await asyncio.Event().wait()
+
 def main():
-    if not TOKEN or not MONGODB_URI: logger.error("🛑 Faltan vars."); return
-    iniciar_hc()
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cancelar", cancelar)); app.add_handler(CommandHandler("cancel", cancelar))
-    app.add_handler(CommandHandler("admin_cargar_listado", admin_cargar)); app.add_handler(CommandHandler("destacar", destacar_cmd))
-    app.add_handler(CommandHandler("addadmin", add_admin_cmd)); app.add_handler(CommandHandler("deladmin", del_admin_cmd))
-    app.add_handler(CommandHandler("anuncio", anuncio_cmd))
-    
-    app.add_handler(CallbackQueryHandler(callbacks_broadcast, pattern=r'^(broadcast_|admin_edit_|admin_stop_promo)'))
-    app.add_handler(CallbackQueryHandler(callbacks))
-    
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, proc_msgs))
-    
-    logger.info(f"🤖 MediCuba {VERSION}")
-    while True:
-        try:
-            app.run_polling(drop_pending_updates=True)
-        except Exception as e:
-            logger.error(f"Polling error: {e}, reiniciando en 10s...")
-            time.sleep(10)
+    try:
+        asyncio.run(main_async())
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
 
 if __name__ == "__main__":
     main()
