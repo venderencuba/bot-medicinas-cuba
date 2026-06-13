@@ -1,6 +1,16 @@
+¡Tienes toda la razón! Te pido disculpas por ambos detalles. 
+
+1. El error de **"nostra"** fue un error tipográfico mío. Ya está corregido a "nuestra".
+2. El error de **Render (`'Updater' object has no attribute 'start'`)** ocurre porque en la versión 20+ de `python-telegram-bot` (la que estás usando), la forma de iniciar el bot cambió. Además, al usar Webhooks con un servidor web propio, no debemos iniciar el Updater de la forma antigua, sino simplemente procesar las actualizaciones a medida que llegan por la web.
+
+He reescrito la sección de inicio del bot específicamente para la arquitectura Webhook de la versión 20+, que es mucho más limpia y elimina ese error de raíz.
+
+Aquí tienes el código completo y corregido. Reemplaza todo tu `bot.py` con esto:
+
+```python
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v3.1.0 | Webhook Architecture | Anti-Sleep Render | Memory Optimized
+v3.1.1 | Webhook Architecture | Fix Updater Start | Fix Typo
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -22,7 +32,7 @@ from rapidfuzz import fuzz as rfuzz
 from aiohttp import web
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v3.1.0"
+VERSION = "v3.1.1"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -213,6 +223,7 @@ def menu_principal(uid, prov, anuncio_idx=0, ultima_act=""):
     if es_admin(uid): tk.append([InlineKeyboardButton("🔧 Admin", callback_data="admin_panel")])
     final_tk = tk_anuncio + tk
     ver = VERSION.replace('v', ''); title_str = f"MediCuba{ ' ' * (22 - len('MediCuba') - len(ver)) }{ver}"
+    # CORRECCIÓN: nostra -> nuestra
     t = f"<code>{title_str}</code>\n🩺 Tu salud, nuestra prioridad\n\n{ultima_act}📍 <b>Provincia:</b> {esc(prov)}{msg_anuncio}"
     return t, InlineKeyboardMarkup(final_tk)
 
@@ -870,7 +881,7 @@ async def callbacks_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE
         await desactivar_promo(context)
         await q.edit_message_text("🏁 Promo desactivada y contadores reseteados.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_panel")]]), parse_mode="HTML")
 
-# ===== WEBHOOK SERVER =====
+# ===== WEBHOOK SERVER (v20+ Compatible) =====
 async def health_check(request):
     return web.Response(text="OK")
 
@@ -878,7 +889,7 @@ async def webhook_handler(request):
     application = request.app['ptb_app']
     data = await request.json()
     update = Update.de_json(data, application.bot)
-    await application.update_queue.put(update)
+    await application.process_update(update)
     return web.Response()
 
 async def post_init(app: Application):
@@ -891,7 +902,8 @@ async def main_async():
     if not TOKEN or not MONGODB_URI:
         logger.error("🛑 Faltan vars."); return
 
-    application = Application.builder().token(TOKEN).post_init(post_init).build()
+    # Construir la app sin Updater nativo (lo gestiona aiohttp)
+    application = Application.builder().token(TOKEN).post_init(post_init).updater(None).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancelar", cancelar)); application.add_handler(CommandHandler("cancel", cancelar))
@@ -905,8 +917,6 @@ async def main_async():
     
     await application.initialize()
     await application.start()
-    await application.updater.initialize()
-    await application.updater.start()
     
     PORT = int(os.environ.get('PORT', 10000))
     RENDER_HOST = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
@@ -939,3 +949,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
