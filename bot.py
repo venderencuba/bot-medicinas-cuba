@@ -213,7 +213,7 @@ def menu_principal(uid, prov, anuncio_idx=0, ultima_act=""):
     if es_admin(uid): tk.append([InlineKeyboardButton("🔧 Admin", callback_data="admin_panel")])
     final_tk = tk_anuncio + tk
     ver = VERSION.replace('v', ''); title_str = f"MediCuba{ ' ' * (22 - len('MediCuba') - len(ver)) }{ver}"
-    t = f"<code>{title_str}</code>\n🩺 Tu salud, nostra prioridad\n\n{ultima_act}📍 <b>Provincia:</b> {esc(prov)}{msg_anuncio}"
+    t = f"<code>{title_str}</code>\n🩺 Tu salud, nuestra prioridad\n\n{ultima_act}📍 <b>Provincia:</b> {esc(prov)}{msg_anuncio}"
     return t, InlineKeyboardMarkup(final_tk)
 
 def menu_post_busqueda():
