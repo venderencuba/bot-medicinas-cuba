@@ -1,16 +1,6 @@
-¡Tienes toda la razón! Te pido disculpas por ambos detalles. 
-
-1. El error de **"nostra"** fue un error tipográfico mío. Ya está corregido a "nuestra".
-2. El error de **Render (`'Updater' object has no attribute 'start'`)** ocurre porque en la versión 20+ de `python-telegram-bot` (la que estás usando), la forma de iniciar el bot cambió. Además, al usar Webhooks con un servidor web propio, no debemos iniciar el Updater de la forma antigua, sino simplemente procesar las actualizaciones a medida que llegan por la web.
-
-He reescrito la sección de inicio del bot específicamente para la arquitectura Webhook de la versión 20+, que es mucho más limpia y elimina ese error de raíz.
-
-Aquí tienes el código completo y corregido. Reemplaza todo tu `bot.py` con esto:
-
-```python
 """
 BOT DE MEDICINAS CUBA - VERSIÓN PROFESIONAL MONGODB
-v3.1.1 | Webhook Architecture | Fix Updater Start | Fix Typo
+v3.0.2 | Anti-Crash Render | Auto-Healing HC | Memory Optimized
 Optimizado para conexiones lentas (Cuba) | Auto-reconexión
 """
 
@@ -20,8 +10,11 @@ import re
 import html
 import asyncio
 import hashlib
+import threading
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -29,10 +22,9 @@ from telegram.ext import (
 )
 from motor.motor_asyncio import AsyncIOMotorClient
 from rapidfuzz import fuzz as rfuzz
-from aiohttp import web
 
 # ===== CONFIGURACIÓN =====
-VERSION = "v3.1.1"
+VERSION = "v3.0.2"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -180,7 +172,7 @@ async def validar_referido(uid, context):
             count = referrer.get("referidos_count", 0) + 1
             
             if count in [10, 20, 30, 40, 50]:
-                try: await context.bot.send_message(ref_id, "🎉 ¡Felicidades! Has ganado un premio por tus referidos. Contacta a Soporte para reclamarlo.", parse_mode="HTML")
+                try: await context.bot.send_message(ref_id, "🎉 Felicidades! Has ganado un premio por tus referidos. Contacta a Soporte para reclamarlo.", parse_mode="HTML")
                 except: pass
                 
             datos["referidos_global"] = datos.get("referidos_global", 0) + 1
@@ -223,7 +215,6 @@ def menu_principal(uid, prov, anuncio_idx=0, ultima_act=""):
     if es_admin(uid): tk.append([InlineKeyboardButton("🔧 Admin", callback_data="admin_panel")])
     final_tk = tk_anuncio + tk
     ver = VERSION.replace('v', ''); title_str = f"MediCuba{ ' ' * (22 - len('MediCuba') - len(ver)) }{ver}"
-    # CORRECCIÓN: nostra -> nuestra
     t = f"<code>{title_str}</code>\n🩺 Tu salud, nuestra prioridad\n\n{ultima_act}📍 <b>Provincia:</b> {esc(prov)}{msg_anuncio}"
     return t, InlineKeyboardMarkup(final_tk)
 
@@ -289,7 +280,8 @@ async def forzar_prov(update, context):
     conteos = await get_lineas_por_provincia()
     lista = "\n".join([f"{i+1}. {p} ({conteos.get(p, 0)})" for i, p in enumerate(PROVINCIAS)])
     tk = [[InlineKeyboardButton("🔙 Volver", callback_data="volver_forzado")]]
-    await update.message.reply_text(f"👋 ¡Bienvenido!\n\n📍 Selecciona:\n\n{lista}\n\nNÚMERO:", reply_markup=InlineKeyboardMarkup(tk))
+    # Sin signos de exclamacion invertidos para evitar SyntaxError
+    await update.message.reply_text(f"👋 Bienvenido!\n\n📍 Selecciona:\n\n{lista}\n\nNÚMERO:", reply_markup=InlineKeyboardMarkup(tk))
 
 async def mostrar_cat_prov(update, pid):
     prov = await coleccion_proveedores.find_one({"_id": pid})
@@ -345,7 +337,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = f"🏥 {dest}<b>{esc(nombre_prov)}</b>\n📞 {esc(prv.get('contacto_mostrar'))}\n\n💊 {esc(o['l'])}\n"
             botones = []; contacto = prv.get("contacto", {}); tel_wa = contacto.get("whatsapp", "").replace("+", "").replace(" ", ""); tel_tg = contacto.get("telegram", ""); search_term = context.user_data.get("last_search", "esto")
             if tel_wa:
-                wa_msg = f"🏥 MediCuba (t.me/MediCubaBot)\n\nHola, ¿Tienes disponible {search_term}?"; wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
+                wa_msg = f"🏥 MediCuba (t.me/MediCubaBot)\n\nHola, Tienes disponible {search_term}?"; wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
                 botones.append([InlineKeyboardButton(f"💬 Ir WhatsApp: {esc(nombre_prov)}", url=wa_url)])
             if tel_tg:
                 tg_url = f"https://t.me/{tel_tg.replace('@','')}"; botones.append([InlineKeyboardButton(f"✈️ Ir Telegram: {esc(nombre_prov)}", url=tg_url)])
@@ -667,7 +659,7 @@ async def _busqueda(update, context, uid, txt):
             for item in data["items"][:3]: msg += f"   • {esc(item)}\n"
             msg += "\n"; contacto = prv.get("contacto", {}); tel_wa = contacto.get("whatsapp", "").replace("+", "").replace(" ", ""); tel_tg = contacto.get("telegram", "")
             if tel_wa:
-                wa_msg = f"🏥 MediCuba (t.me/MediCubaBot)\n\nHola, ¿Tienes disponible {txt}?"; wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
+                wa_msg = f"🏥 MediCuba (t.me/MediCubaBot)\n\nHola, Tienes disponible {txt}?"; wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
                 botones.append([InlineKeyboardButton(f"💬 Ir WhatsApp: {esc(nombre_prov)}", url=wa_url)])
             if tel_tg:
                 tg_url = f"https://t.me/{tel_tg.replace('@','')}"; botones.append([InlineKeyboardButton(f"✈️ Ir Telegram: {esc(nombre_prov)}", url=tg_url)])
@@ -700,7 +692,7 @@ async def _seleccion(update, context, uid, txt):
             msg = f"🏥 {dest}<b>{esc(nombre_prov)}</b>\n📞 {esc(prv.get('contacto_mostrar'))}\n\n💊 {esc(o['l'])}\n"
             botones = []; contacto = prv.get("contacto", {}); tel_wa = contacto.get("whatsapp", "").replace("+", "").replace(" ", ""); tel_tg = contacto.get("telegram", ""); search_term = context.user_data.get("last_search", "esto")
             if tel_wa:
-                wa_msg = f"🏥 MediCuba (t.me/MediCubaBot)\n\nHola, ¿Tienes disponible {search_term}?"; wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
+                wa_msg = f"🏥 MediCuba (t.me/MediCubaBot)\n\nHola, Tienes disponible {search_term}?"; wa_url = f"https://wa.me/{tel_wa}?text={wa_msg.replace(' ', '%20')}"
                 botones.append([InlineKeyboardButton(f"💬 Ir WhatsApp: {esc(nombre_prov)}", url=wa_url)])
             if tel_tg:
                 tg_url = f"https://t.me/{tel_tg.replace('@','')}"; botones.append([InlineKeyboardButton(f"✈️ Ir Telegram: {esc(nombre_prov)}", url=tg_url)])
@@ -753,7 +745,7 @@ async def _telegram(update, context, uid, txt):
 async def _fin_reg(update, context, uid):
     ed = context.user_data.get("editando_contacto", False); prv = await coleccion_proveedores.find_one({"_id": uid})
     if ed: msg = f"✅ Contacto actualizado:\n📞 {esc(prv.get('contacto_mostrar'))}"; context.user_data["editando_contacto"] = False
-    else: lk = f"t.me/MediCubaBot?start=proveedor_{uid}"; msg = f"✅ <b>¡Publicado!</b>\n\n📋 {context.user_data.get('mc',0)} líneas\n📞 {esc(prv.get('contacto_mostrar'))}\n\n🔗 <code>{lk}</code>"
+    else: lk = f"t.me/MediCubaBot?start=proveedor_{uid}"; msg = f"✅ <b>Publicado!</b>\n\n📋 {context.user_data.get('mc',0)} líneas\n📞 {esc(prv.get('contacto_mostrar'))}\n\n🔗 <code>{lk}</code>"
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menú", callback_data="volver")]]), parse_mode="HTML"); context.user_data.clear()
 
 # ===== ADMIN CMDS =====
@@ -881,72 +873,63 @@ async def callbacks_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE
         await desactivar_promo(context)
         await q.edit_message_text("🏁 Promo desactivada y contadores reseteados.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="admin_panel")]]), parse_mode="HTML")
 
-# ===== WEBHOOK SERVER (v20+ Compatible) =====
-async def health_check(request):
-    return web.Response(text="OK")
+# ===== HEALTH CHECK INDESTRUCTIBLE =====
+class HCH(BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        except Exception:
+            pass
+    def log_message(self, fmt, *a): pass
 
-async def webhook_handler(request):
-    application = request.app['ptb_app']
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return web.Response()
+def iniciar_hc():
+    p = int(os.environ.get('PORT', 10000))
+    def run_server():
+        while True:
+            try:
+                server = HTTPServer(('0.0.0.0', p), HCH)
+                server.serve_forever()
+            except Exception as e:
+                logger.error(f"HC error: {e}, reiniciando en 5s...")
+                time.sleep(5)
+    threading.Thread(target=run_server, daemon=True).start()
+    logger.info(f"✅ HC puerto {p} iniciado")
 
-async def post_init(app: Application):
+# ===== MAIN =====
+async def post_init(app):
     await init_config()
+    try: await app.bot.delete_webhook(drop_pending_updates=True)
+    except: pass
     try:
         await coleccion_catalogos.create_index([("provincia", 1)]); await coleccion_catalogos.create_index([("proveedor_id", 1)]); await coleccion_catalogos.create_index([("fecha_expiracion", 1)])
     except: pass
 
-async def main_async():
-    if not TOKEN or not MONGODB_URI:
-        logger.error("🛑 Faltan vars."); return
-
-    # Construir la app sin Updater nativo (lo gestiona aiohttp)
-    application = Application.builder().token(TOKEN).post_init(post_init).updater(None).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("cancelar", cancelar)); application.add_handler(CommandHandler("cancel", cancelar))
-    application.add_handler(CommandHandler("admin_cargar_listado", admin_cargar)); application.add_handler(CommandHandler("destacar", destacar_cmd))
-    application.add_handler(CommandHandler("addadmin", add_admin_cmd)); application.add_handler(CommandHandler("deladmin", del_admin_cmd))
-    application.add_handler(CommandHandler("anuncio", anuncio_cmd))
-    
-    application.add_handler(CallbackQueryHandler(callbacks_broadcast, pattern=r'^(broadcast_|admin_edit_|admin_stop_promo)'))
-    application.add_handler(CallbackQueryHandler(callbacks))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, proc_msgs))
-    
-    await application.initialize()
-    await application.start()
-    
-    PORT = int(os.environ.get('PORT', 10000))
-    RENDER_HOST = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
-    
-    if RENDER_HOST:
-        webhook_url = f"https://{RENDER_HOST}/{TOKEN}"
-        await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-        logger.info(f"✅ Webhook configurado en: {webhook_url}")
-    else:
-        logger.warning("⚠️ RENDER_EXTERNAL_HOSTNAME no detectado. Webhook no configurado (¿ejecución local?).")
-
-    web_app = web.Application()
-    web_app['ptb_app'] = application
-    web_app.router.add_get("/", health_check)
-    web_app.router.add_post(f"/{TOKEN}", webhook_handler)
-    
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"✅ Servidor Web escuchando en puerto {PORT}")
-    
-    await asyncio.Event().wait()
-
 def main():
-    try:
-        asyncio.run(main_async())
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+    if not TOKEN or not MONGODB_URI: logger.error("🛑 Faltan vars."); return
+    iniciar_hc()
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancelar", cancelar)); app.add_handler(CommandHandler("cancel", cancelar))
+    app.add_handler(CommandHandler("admin_cargar_listado", admin_cargar)); app.add_handler(CommandHandler("destacar", destacar_cmd))
+    app.add_handler(CommandHandler("addadmin", add_admin_cmd)); app.add_handler(CommandHandler("deladmin", del_admin_cmd))
+    app.add_handler(CommandHandler("anuncio", anuncio_cmd))
+    
+    app.add_handler(CallbackQueryHandler(callbacks_broadcast, pattern=r'^(broadcast_|admin_edit_|admin_stop_promo)'))
+    app.add_handler(CallbackQueryHandler(callbacks))
+    
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, proc_msgs))
+    
+    logger.info(f"🤖 MediCuba {VERSION}")
+    while True:
+        try:
+            app.run_polling(drop_pending_updates=True)
+        except Exception as e:
+            logger.error(f"Polling error: {e}, reiniciando en 10s...")
+            time.sleep(10)
 
 if __name__ == "__main__":
     main()
-```
